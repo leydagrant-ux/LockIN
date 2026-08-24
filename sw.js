@@ -16,6 +16,7 @@ const CACHE = `lockin-${VERSION}`;
 const SHELL = [
   './',
   './index.html',
+  './ui.js',
   './config.js',
   './db.js',
   './ai.js',

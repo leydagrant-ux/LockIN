@@ -1,21 +1,28 @@
 # LockIN — build status
 
-**Last worked: 2026-08-23.** Everything below is on disk and verified. Not yet a
-git repo, not yet deployed.
+**Last worked: 2026-08-24.** The app is BUILT and pushed. Firebase config is in.
+Remaining work is deployment and setup, not code.
 
 ## Where to pick up
-
-**The next task is `index.html`.** It is the only substantial file not written.
-Every module it needs is finished, tested and has a documented API. Nothing else
-is half-done, so there is no cleanup to do first.
-
-Start the dev server and open the test page to confirm the state is still good:
 
 ```bash
 python -m http.server 8777 --directory LockIN
 ```
 
-`http://localhost:8777/selftest.html` should show **221 / 221 passing**.
+- `http://localhost:8777/selftest.html` — should show **221 / 221 passing**
+- `http://localhost:8777/index.html?demo` — the whole app against generated data,
+  no Firebase needed. `&tab=body` jumps to a screen. This is how every screen
+  gets reviewed.
+
+**Next: deploy.** In order:
+1. Create a **Cloudflare** account (Grant must do this himself), then
+   `cd worker && npx wrangler login && npx wrangler deploy`, then
+   `npx wrangler secret put GROQ_API_KEY` and `USDA_API_KEY`.
+   Put the resulting URL in `WORKER_URL` in `config.js`.
+2. Enable **GitHub Pages** (Settings → Pages → main / root).
+3. Both accounts sign up on the live site; each uid appears on the More tab.
+   Those uids go into `MEMBERS` (config.js), `members()` (firestore.rules) and
+   `ALLOWED_UIDS` (wrangler.toml). Redeploy the Worker; publish the rules.
 
 ---
 
@@ -34,52 +41,42 @@ python -m http.server 8777 --directory LockIN
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
 | `selftest.js/.html` | 221 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
+| `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
 
 ---
 
 ## What is left
 
-1. **`index.html`** — the whole UI. Spec below.
-2. **Deploy** — follow README setup. Nothing in it is guesswork; every step was
-   checked.
-3. **Live verification** — the three "not yet run" rows above. In particular the
-   Worker's JWT verification has never executed against a real token.
-4. **Firestore rules probe** — sign up a throwaway third account by REST and
+1. **Deploy** — the three steps above.
+2. **Live verification** — `ai.js`, `db.js` and the Worker have never run against
+   live services. In particular the Worker's Firebase JWT verification has never
+   seen a real token.
+3. **Firestore rules probe** — sign up a throwaway third account by REST and
    assert it can read nothing; assert the partner can read shared photos but not
    private ones. Same approach that worked on the Bankroll app.
+4. **Not built yet, deliberately deferred:** barcode scanning (needs a JS scanner
+   library), AI program generation wired to the Build screen (templates cover it),
+   couple challenges beyond the weekly score.
 
 ---
 
-## `index.html` spec
+## Bugs the browser testing caught
 
-A `type="module"` shell importing every module. Dark theme, bottom tab bar,
-built for a phone.
+None of these would have been found by reading the code, and all three shipped
+silently in the first cut:
 
-**Tabs:** Today · Body · Food · Stats · More
-
-- **Today** — readiness check-in (4 sliders + sore muscle groups) → run
-  `program.adjustSession()` and show what it changed and why → the workout
-  logger (sets, reps, weight, rest timer, PR badges from `stats.newPRsIn`).
-- **Body** — `anatomy.bodySVG()` heat map from `stats.volumeByGroup()`, front and
-  back toggle, male for Grant / female for Ashtin from `config.MEMBERS`. Weekly
-  set-target hexagon ring against `program.VOLUME_LANDMARKS`. Weigh-ins,
-  measurements, progress photos with the private toggle.
-- **Food** — search first (`foods.searchAll`), barcode, saved library, then the
-  "just describe it" chat via `ai.logMeal` capped at 2 questions. Daily macro
-  rings against `stats.macroTargets()`.
-- **Stats** — weekly leaderboard from `score.leaderboard()` with the component
-  breakdown, e1RM curves, volume chart, consistency heatmap.
-- **More** — onboarding/profile, equipment checklist per gym profile, program
-  generation, health document upload, settings, export/import, uid display.
-
-**Onboarding wizard** (first run): name and sex, body stats, goal and target,
-ideal physique, experience and days per week, equipment, injuries, optional
-health docs, starting photos.
-
-Load the `dataviz` skill before writing any chart code.
-
----
+- **Event listeners accumulated on every render.** `render()` re-attached the
+  delegated handlers, so by the third render one tap fired three handlers: a set
+  toggle flipped back to where it started and one "add set" produced three.
+- **A typed set that was never ticked was thrown away.** Sets saved with
+  `done: false`, and `stats.js` treats that as never performed — so it vanished
+  from PRs, volume and tonnage. Every stat silently undercounted.
+- **`stopPropagation` on the sheet killed everything inside it.** No control in
+  any sheet worked. The backdrop-target guard in `wire()` is the mechanism; the
+  stopPropagation was both redundant and fatal.
+- **Equipment presets appeared to do nothing.** A sheet body is a snapshot, so a
+  full `render()` redrew stale markup. `setEquipment()` repaints in place.
 
 ## Decisions already made — do not re-litigate
 

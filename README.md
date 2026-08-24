@@ -122,7 +122,8 @@ degraded app, it is a blank one.
 ## Architecture
 
 ```
-index.html      UI shell, views, rendering
+index.html      shell, design tokens, styles
+ui.js           views, state, charts, all interaction
 config.js       Firebase config, Worker URL, the two member uids
 db.js           Firebase auth + Firestore + image compression
 ai.js           every Groq call, with the JSON schemas
@@ -182,6 +183,11 @@ python -m http.server 8777 --directory LockIN
 
 Then <http://localhost:8777>. That origin is already in the Worker's
 `ALLOWED_ORIGINS`.
+
+**`?demo` runs the whole app against generated data with Firebase bypassed** —
+useful before setup is finished, and the fastest way to eyeball a change to a
+screen. `?demo&tab=body` jumps straight to one. Every write is a no-op, so it
+cannot touch the network.
 
 ---
 
