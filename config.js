@@ -19,7 +19,7 @@ export const FIREBASE = {
 
 /* Your deployed Cloudflare Worker, no trailing slash.
    e.g. 'https://lockin-api.yourname.workers.dev' */
-export const WORKER_URL = '';
+export const WORKER_URL = 'https://lockin-api.leydagrant.workers.dev';
 
 /* The two people using this app. Fill in each uid after the account exists —
    Settings shows you your own uid once you are signed in. Everything is shared
