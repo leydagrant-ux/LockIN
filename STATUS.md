@@ -1,28 +1,46 @@
 # LockIN — build status
 
-**Last worked: 2026-08-24.** The app is BUILT and pushed. Firebase config is in.
-Remaining work is deployment and setup, not code.
+**Last worked: 2026-08-24. DEPLOYED AND LIVE.**
 
-## Where to pick up
+- App: **https://leydagrant-ux.github.io/LockIN/**  (`?demo` runs it on fake data)
+- Worker: **https://lockin-api.leydagrant.workers.dev**
+- Firebase: **lockin-dffd9** · Repo: **github.com/leydagrant-ux/LockIN**
+
+Both accounts are wired through all three gates and the Firestore rules are
+published. Setup is finished; from here it is ordinary feature work.
+
+| Account | uid |
+|---|---|
+| leydagrant@gmail.com | `ktqSNUWrW4ZF5cH7wzOED362Saf1` |
+| ashtinsmith73571@gmail.com | `v1Foijd9ZagOEhIu8TFQIHhq0513` |
+
+Both Worker secrets (`GROQ_API_KEY`, `USDA_API_KEY`) are set as Cloudflare
+secrets. They exist nowhere on disk — to rotate one, run
+`npx wrangler secret put <NAME>` from `worker/`.
+
+## Verified after deploy
+
+- Worker fails closed: 405 on GET, 403 without an allowed Origin, 401 without a
+  valid Firebase token, CORS returns `null` to a hostile origin.
+- Firestore denies every unauthenticated read AND write (probed by REST against
+  both users' docs, subcollections and the couple doc — all 403).
+- **Still unverified:** a signed-in read by a real account, and a live Groq call.
+  Both need a real session; check them the first time the app is used.
+
+## Local development
 
 ```bash
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — should show **221 / 221 passing**
-- `http://localhost:8777/index.html?demo` — the whole app against generated data,
-  no Firebase needed. `&tab=body` jumps to a screen. This is how every screen
-  gets reviewed.
+- `http://localhost:8777/selftest.html` — **221 / 221 passing**
+- `http://localhost:8777/index.html?demo` — whole app on generated data,
+  `&tab=body` jumps to a screen
 
-**Next: deploy.** In order:
-1. Create a **Cloudflare** account (Grant must do this himself), then
-   `cd worker && npx wrangler login && npx wrangler deploy`, then
-   `npx wrangler secret put GROQ_API_KEY` and `USDA_API_KEY`.
-   Put the resulting URL in `WORKER_URL` in `config.js`.
-2. Enable **GitHub Pages** (Settings → Pages → main / root).
-3. Both accounts sign up on the live site; each uid appears on the More tab.
-   Those uids go into `MEMBERS` (config.js), `members()` (firestore.rules) and
-   `ALLOWED_UIDS` (wrangler.toml). Redeploy the Worker; publish the rules.
+## Deploying a change
+
+`git push`, and **bump `VERSION` in `sw.js` every time** or the old shell is
+served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 
 ---
 
