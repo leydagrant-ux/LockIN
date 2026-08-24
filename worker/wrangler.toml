@@ -14,7 +14,7 @@ FIREBASE_PROJECT_ID = "lockin-dffd9"
 # The two Firebase UIDs allowed to use the backend, comma separated. Fill these
 # in after both accounts exist. Leaving it empty allows ANY valid account from
 # the project, which is fine only while you are the only account.
-ALLOWED_UIDS = ""
+ALLOWED_UIDS = "ktqSNUWrW4ZF5cH7wzOED362Saf1"
 
 # Secrets are NOT set here. Run these once each:
 #   npx wrangler secret put GROQ_API_KEY

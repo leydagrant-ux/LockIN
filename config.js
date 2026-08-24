@@ -26,8 +26,10 @@ export const WORKER_URL = 'https://lockin-api.leydagrant.workers.dev';
    between these two accounts (progress photos and health documents excepted,
    which are private unless explicitly shared). */
 export const MEMBERS = {
-  // 'firebase-uid-here': { name: 'Grant',  sex: 'male' },
-  // 'firebase-uid-here': { name: 'Ashtin', sex: 'female' },
+  'ktqSNUWrW4ZF5cH7wzOED362Saf1': { name: 'Grant', sex: 'male' },
+  // Ashtin's uid goes here once she signs up. Until then the app simply has no
+  // partner to show, which every screen already handles.
+  // 'her-uid-here': { name: 'Ashtin', sex: 'female' },
 };
 
 /* Shared id for the couple document that holds challenges and weekly scores.

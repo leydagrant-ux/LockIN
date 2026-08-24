@@ -24,7 +24,7 @@ service cloud.firestore {
        deliberately failing closed rather than open. */
     function members() {
       return [
-        'REPLACE_WITH_GRANT_UID',
+        'ktqSNUWrW4ZF5cH7wzOED362Saf1',
         'REPLACE_WITH_ASHTIN_UID'
       ];
     }
