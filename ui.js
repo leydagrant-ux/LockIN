@@ -307,7 +307,7 @@ function view() {
 let authMode = 'in';
 
 function authView() {
-  return `<div class="screen no-tabs" style="max-width:400px;padding-top:56px">
+  return `<div class="screen no-tabs" style="max-width:400px;padding-top:calc(56px + var(--safe-t))">
     <div class="center" style="margin-bottom:28px">
       <div style="font:800 34px system-ui;letter-spacing:-.04em">Lock<span style="color:var(--accent)">IN</span></div>
       <div class="muted tiny" style="margin-top:4px">Two people. One scoreboard.</div>
