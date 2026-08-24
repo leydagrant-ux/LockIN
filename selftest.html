@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LockIN self-test</title>
+<style>
+  :root { --bg:#0f1319; --card:#171d26; --line:#252d3a; --text:#e9eef5;
+          --dim:#8994a4; --ok:#46d39a; --fail:#ff4f6a; }
+  body { background:var(--bg); color:var(--text); margin:0; padding:20px;
+         font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h1 { font:600 18px system-ui; margin:0 0 4px; }
+  .sub { color:var(--dim); font:13px system-ui; margin-bottom:18px; }
+  .banner { padding:14px 16px; border-radius:12px; font:600 15px system-ui; margin-bottom:18px; }
+  .banner.pass { background:rgba(70,211,154,.12); color:var(--ok); border:1px solid rgba(70,211,154,.3); }
+  .banner.fail { background:rgba(255,79,106,.12); color:var(--fail); border:1px solid rgba(255,79,106,.3); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px;
+            padding:12px 14px; margin-bottom:10px; }
+  h2 { font:600 12px system-ui; text-transform:uppercase; letter-spacing:.09em;
+       color:var(--dim); margin:0 0 8px; }
+  .row { display:flex; gap:10px; padding:3px 0; align-items:baseline; }
+  .mark { flex:none; width:16px; }
+  .row.ok .mark { color:var(--ok); }
+  .row.no .mark { color:var(--fail); }
+  .row.no { color:var(--fail); }
+  .detail { color:var(--dim); }
+  .row.no .detail { color:var(--fail); opacity:.85; }
+  /* Failures are what you came for, so they get a shortcut to the top. */
+  #failures:empty { display:none; }
+</style>
+</head>
+<body>
+<h1>LockIN self-test</h1>
+<div class="sub">
+  Regression suite over the pure modules: exercises.js, program.js, score.js, stats.js.
+  Run this after any change to those four files.
+</div>
+<div id="banner" class="banner">Running…</div>
+<div id="failures"></div>
+<div id="out"></div>
+
+<script type="module">
+import { runAll } from './selftest.js';
+
+const { results, passed, failed, total } = runAll();
+
+const banner = document.getElementById('banner');
+banner.className = `banner ${failed ? 'fail' : 'pass'}`;
+banner.textContent = failed
+  ? `${failed} of ${total} checks FAILED`
+  : `All ${total} checks passed`;
+
+const rowHTML = (r) => `
+  <div class="row ${r.pass ? 'ok' : 'no'}">
+    <span class="mark">${r.pass ? '✓' : '✕'}</span>
+    <span>${r.label}${r.detail ? ` <span class="detail">(${r.detail})</span>` : ''}</span>
+  </div>`;
+
+/* Failures repeated up top so a long green suite never buries the one red line. */
+if (failed) {
+  document.getElementById('failures').innerHTML =
+    `<section><h2>Failures</h2>${results.filter((r) => !r.pass).map(rowHTML).join('')}</section>`;
+}
+
+const sections = new Map();
+for (const r of results) {
+  if (!sections.has(r.section)) sections.set(r.section, []);
+  sections.get(r.section).push(r);
+}
+
+document.getElementById('out').innerHTML = [...sections.entries()].map(([name, rows]) => {
+  const bad = rows.filter((r) => !r.pass).length;
+  return `<section>
+    <h2>${name} ${bad ? `— ${bad} failing` : `— ${rows.length} ok`}</h2>
+    ${rows.map(rowHTML).join('')}
+  </section>`;
+}).join('');
+
+console.log(`${passed}/${total} passed`);
+</script>
+</body>
+</html>

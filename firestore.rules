@@ -1,0 +1,110 @@
+rules_version = '2';
+
+/* LockIN security rules.
+ *
+ * Two accounts, hard-coded. Everything is readable by both of them EXCEPT
+ * progress photos marked private and health documents not explicitly shared,
+ * which stay owner-only. Writes are always owner-only: neither person can ever
+ * edit the other's logs, even by accident.
+ *
+ * IMPORTANT: rules cannot filter a list query. A query that could match a
+ * document the rules deny fails ENTIRELY rather than returning a subset. So the
+ * partner-facing reads in db.js query `where('private','==',false)` and
+ * `where('shared','==',true)`, and the rules below are written to accept
+ * exactly those shapes. Change one without the other and the query breaks.
+ *
+ * Paste into Firebase console -> Firestore -> Rules -> Publish.
+ */
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* Replace both with the real uids. Settings in the app shows you your own
+       once you are signed in. Until they are filled in, NOBODY has access —
+       deliberately failing closed rather than open. */
+    function members() {
+      return [
+        'REPLACE_WITH_GRANT_UID',
+        'REPLACE_WITH_ASHTIN_UID'
+      ];
+    }
+
+    function isMember() {
+      return request.auth != null && request.auth.uid in members();
+    }
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    /* Profile: goals, equipment, settings. Shared, so the app can show whose
+       program is whose and render the right body diagram. */
+    match /users/{userId} {
+      allow read: if isMember();
+      allow create, update: if isOwner(userId);
+      allow delete: if false;
+    }
+
+    /* Fully shared logs. This is the point of the app — seeing each other
+       train — so both members read, only the owner writes. */
+    match /users/{userId}/workouts/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+    match /users/{userId}/metrics/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+    match /users/{userId}/meals/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+    match /users/{userId}/cardio/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+    match /users/{userId}/checkins/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+    match /users/{userId}/programs/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner(userId);
+    }
+
+    /* The saved food library is personal clutter, not something to browse.
+       Owner-only, and nothing in the app asks for anyone else's. */
+    match /users/{userId}/foods/{docId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    /* Progress photos: private by default. The partner may read one only when
+       it is explicitly marked not private. */
+    match /users/{userId}/photos/{docId} {
+      allow read: if isOwner(userId)
+                  || (isMember() && resource.data.private == false);
+      allow write: if isOwner(userId);
+    }
+
+    /* Bloodwork and body scans: medical records, so private unless shared. */
+    match /users/{userId}/health/{docId} {
+      allow read: if isOwner(userId)
+                  || (isMember() && resource.data.shared == true);
+      allow write: if isOwner(userId);
+    }
+
+    /* The shared document: weekly scores and challenges. Both members write
+       here, but each only ever writes their own score key — enforcing that
+       structurally would need a rule per week key, so it relies on the app.
+       The blast radius is one of two people editing a leaderboard number in a
+       two-person app, which is an acceptable trade for the complexity saved. */
+    match /couple/{coupleId} {
+      allow read, write: if isMember();
+    }
+
+    /* Anything not matched above is denied. */
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

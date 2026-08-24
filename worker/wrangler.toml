@@ -1,0 +1,21 @@
+name = "lockin-api"
+main = "index.js"
+compatibility_date = "2026-08-01"
+
+# Origins allowed to call this Worker. The GitHub Pages site plus the local
+# dev server. Anything else is refused before a token is even checked.
+[vars]
+ALLOWED_ORIGINS = "https://leydagrant-ux.github.io,http://localhost:8777"
+
+# Your Firebase project id, e.g. "lockin-1a2b3". Tokens are only accepted if
+# their audience and issuer match this exactly.
+FIREBASE_PROJECT_ID = "lockin-dffd9"
+
+# The two Firebase UIDs allowed to use the backend, comma separated. Fill these
+# in after both accounts exist. Leaving it empty allows ANY valid account from
+# the project, which is fine only while you are the only account.
+ALLOWED_UIDS = ""
+
+# Secrets are NOT set here. Run these once each:
+#   npx wrangler secret put GROQ_API_KEY
+#   npx wrangler secret put USDA_API_KEY
