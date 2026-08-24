@@ -332,6 +332,9 @@ function authView() {
       <button class="btn ghost wide sm" data-act="auth-toggle" style="margin-top:10px">
         ${authMode === 'up' ? 'I already have an account' : 'Create an account'}
       </button>
+      ${authMode === 'up' ? '' : `<button class="btn ghost wide sm" data-act="auth-reset" style="margin-top:8px">
+        Forgot password?
+      </button>`}
     </div>
   </div>`;
 }
@@ -1212,6 +1215,12 @@ async function commitProgram(expanded, days) {
 
 const ACTIONS = {
   'auth-toggle': () => { authMode = authMode === 'in' ? 'up' : 'in'; render(); },
+  'auth-reset': () => guard(async () => {
+    const email = document.getElementById('a-email')?.value.trim();
+    if (!email) return toast('Type your email above first', 'warn');
+    try { await DB.resetPassword(email); } catch (err) { throw new Error(DB.authErrorMessage(err)); }
+    toast('Reset link sent. Check your email.', 'ok');
+  }),
   'close-sheet': closeSheet,
 
   'body-view': (el) => { S.bodyView = el.dataset.val; render(); },
@@ -1766,11 +1775,17 @@ function wire(root) {
 
 const FORMS = {
   'auth-form': async (d) => {
-    if (authMode === 'up') {
-      await DB.signUp(d.email, d.password, d.name);
-      draft.name = d.name;
-    } else {
-      await DB.signIn(d.email, d.password);
+    /* Firebase's own message ("Firebase: Error (auth/invalid-credential).")
+       tells nobody anything, so every auth failure goes through the mapper. */
+    try {
+      if (authMode === 'up') {
+        await DB.signUp(d.email, d.password, d.name);
+        draft.name = d.name;
+      } else {
+        await DB.signIn(d.email, d.password);
+      }
+    } catch (err) {
+      throw new Error(DB.authErrorMessage(err));
     }
   },
 
