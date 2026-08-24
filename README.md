@@ -141,7 +141,8 @@ foods.js        USDA / Open Food Facts / barcode / saved library
 anatomy.js      body diagram renderer, palettes, data mapping   [pure]
 anatomy-paths.js  generated muscle geometry (MIT, see Credits)  [pure]
 exercises.js    149 exercises + equipment taxonomy              [pure]
-program.js      overload, mesocycle expansion, auto-regulation  [pure]
+program.js      overload, mesocycle expansion, auto-regulation,
+                stall detection for progressive overload         [pure]
 score.js        weekly LockIN score, ISO weeks, streaks         [pure]
 stats.js        e1RM, volume, trends, macro targets             [pure]
 selftest.js     221 regression checks over the pure modules
@@ -150,6 +151,47 @@ worker/         Cloudflare Worker: /ai and /food
 
 The six `[pure]` modules have no DOM, no network and no Firebase, which is what
 lets `selftest.js` check them exhaustively in node.
+
+### Sessions in progress live on the phone, not in Firestore
+
+Half a workout is not a record of anything. Syncing it would put a half-empty
+session on the partner's leaderboard, and it is the one write that has to
+survive a phone locking itself in a gym with no signal, which rules out the
+network. So the live session and the cardio timer are held in `localStorage`,
+per device and per account, and are restored on the next load. Anything older
+than 36 hours is treated as abandoned rather than paused, because restoring
+yesterday's half-finished session onto today's date would log work that never
+happened.
+
+The cardio timer stores *when it started* and *how much time was banked before
+the last pause* rather than counting seconds up, so it stays accurate through a
+locked screen, a backgrounded tab and a full reload.
+
+### The plan follows the person
+
+Swapping an exercise mid-session is a decision, not a slip. When a session that
+came from the program is finished, that day's template is rewritten to match
+what was actually done. The rep range is left alone when the reps landed inside
+it, so hitting 9 in an 8-12 range does not quietly narrow the range to 9-9 and
+freeze progression.
+
+### Machines added by photograph
+
+Point the camera at the name plate. The Worker's `/vision` route takes a
+`subject` field — `meal` or `equipment` — which only changes the prompt; a
+gym machine is photographed for its label, so reading the text matters as much
+as recognising the shape. The description then goes to `gpt-oss-120b` along with
+the real equipment and muscle id lists, and everything that comes back is
+filtered against those lists rather than trusted: a hallucinated equipment id
+would silently unlock exercises the person cannot do, and a hallucinated muscle
+id would land in the body heat map as a muscle that does not exist.
+
+The suggested name is always shown in an editable field before anything is
+saved, because a plate that reads `RS-2203` is a part number, not a name.
+
+Custom machines are merged into the SAME arrays the built-in library uses. Every
+consumer reads `EX.BY_ID`, so a parallel list would mean a machine you added
+showed up when logging and then contributed nothing to any chart.
 
 ### The split that keeps this free
 
@@ -173,6 +215,17 @@ node selftest.js
 Or open `/selftest.html` in a browser for the same suite with a pass/fail
 breakdown. Run it after any change to `exercises.js`, `program.js`, `score.js`
 or `stats.js`.
+
+**`node --check` is not a syntax check for these files.** It parses as a script,
+not a module, and a file that passes it can still be rejected outright by the
+browser. Check as a module instead:
+
+```bash
+node --input-type=module -e "import('./ai.js').catch(e => { console.log(e.message); process.exit(1) })"
+```
+
+`ui.js` and `db.js` will report an unresolved `https:` specifier under node —
+that is the Firebase CDN import, and it means the file parsed.
 
 Three real bugs it has already caught, all of which would have shipped:
 

@@ -10,7 +10,7 @@
  * it is really there.
  */
 
-const VERSION = 'v0.2.2';
+const VERSION = 'v0.3.0';
 const CACHE = `lockin-${VERSION}`;
 
 const SHELL = [

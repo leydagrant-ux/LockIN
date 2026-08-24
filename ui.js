@@ -57,6 +57,7 @@ const S = {
   workouts: [], meals: [], cardio: [], metrics: [], checkins: [], photos: [], foods: [],
   program: null, couple: {},
   session: null,      /* live workout being logged */
+  timer: null,        /* live cardio timer */
   bodyView: 'front',
   sheet: null,
   busy: false,
@@ -64,6 +65,45 @@ const S = {
 
 const todayKey = () => SCORE.dayKey(new Date());
 const thisWeek = () => SCORE.isoWeekKey(new Date());
+
+/* ============================== unfinished work ============================== */
+
+/*
+ * A session in progress lives in localStorage, not Firestore.
+ *
+ * Half a workout is not a record of anything, and syncing it would put a
+ * half-empty session on the partner's leaderboard. It is also the one write
+ * that has to survive a phone locking itself in a gym with no signal, which
+ * rules out the network. It is per-device on purpose: you finish the workout on
+ * the phone you started it on.
+ */
+const draftKey = () => `lockin.draft.${S.user?.uid || 'anon'}`;
+const timerKey = () => `lockin.timer.${S.user?.uid || 'anon'}`;
+
+/* Anything older than this was abandoned, not paused. Restoring yesterday's
+   half-finished session onto today's date would log work that never happened. */
+const DRAFT_MAX_AGE = 36 * 3600 * 1000;
+
+function stash(key, value) {
+  try {
+    if (value) localStorage.setItem(key, JSON.stringify(value));
+    else localStorage.removeItem(key);
+  } catch { /* private browsing or quota: the session still works, it just will
+               not survive a reload. Not worth interrupting a workout over. */ }
+}
+
+function unstash(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    if (!value || Date.now() - (value.startedAt || 0) > DRAFT_MAX_AGE) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return value;
+  } catch { return null; }
+}
 
 /* ============================== helpers ============================== */
 
@@ -77,8 +117,23 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 /** Render the whole app. Cheap enough at this data volume, and removes a whole
     class of stale-view bugs that partial updates invite. */
 function render() {
-  $('#app').innerHTML = view() + (S.user && S.profile?.complete ? tabBar() : '') + sheetHTML();
+  $('#app').innerHTML = view() + (S.user && S.profile?.complete ? tabBar() : '')
+    + resumeBar() + sheetHTML();
+  /* Every mutation ends in a render, so this one line is the whole persistence
+     story for an in-progress session. The typing handler saves separately
+     because it deliberately does not re-render. */
+  stash(draftKey(), S.session);
+  stash(timerKey(), S.timer);
+  if (S.timer?.running) startTicking();
 }
+
+/** A way back to a workout you walked away from, on every other tab. */
+const resumeBar = () => (S.session && S.tab !== 'today' && S.profile?.complete
+  ? `<button class="btn primary" data-act="back-to-session"
+      style="position:fixed;left:16px;right:16px;bottom:calc(var(--tab-h) + var(--safe-b) + 10px);
+      z-index:40;max-width:608px;margin:0 auto;box-shadow:0 8px 24px rgba(0,0,0,.5)">
+      Workout in progress &middot; resume</button>`
+  : '');
 
 const toast = (msg, kind = 'info') => {
   const el = document.createElement('div');
@@ -295,6 +350,7 @@ function view() {
   if (!S.profile?.complete) return onboardView();
   switch (S.tab) {
     case 'body': return bodyView();
+    case 'cardio': return cardioView();
     case 'food': return foodView();
     case 'stats': return statsView();
     case 'more': return moreView();
@@ -480,7 +536,9 @@ function todayView() {
       </div>
     </div>
 
-    ${S.session ? loggerCard() : ''}
+    ${S.session && !S.session.paused ? loggerCard() : ''}
+
+    ${S.session?.paused ? pausedCard() : ''}
 
     ${!S.session && !checkin ? checkinCard() : ''}
 
@@ -499,6 +557,8 @@ function todayView() {
     </div>` : ''}
 
     ${loggedToday ? `<div class="banner ok">Session logged today. ${esc(prSummary())}</div>` : ''}
+
+    ${overloadCard()}
 
     ${recentCard()}
   </div>`;
@@ -604,9 +664,10 @@ function loggerCard() {
     <hr class="sep">
     <button class="btn sm ghost wide" data-act="add-exercise">+ add exercise</button>
     <div class="btn-row" style="margin-top:12px">
-      <button class="btn" data-act="cancel-session">Discard</button>
+      <button class="btn" data-act="pause-session">Leave for now</button>
       <button class="btn primary" data-act="finish-session">Finish</button>
     </div>
+    <button class="btn ghost wide sm" data-act="cancel-session" style="margin-top:8px;color:var(--bad)">Discard</button>
   </div>`;
 }
 
@@ -621,13 +682,15 @@ function recentCard() {
   if (!recent.length) return '';
   return `<div class="card">
     <div class="card-title">Recent sessions</div>
-    ${recent.map((w) => `<div class="list-row">
+    ${recent.map((w) => `<div class="list-row" data-act="view-workout" data-id="${esc(w.id)}" role="button" tabindex="0">
       <div class="grow">
         <b class="ellip">${esc(w.name || 'Workout')}</b>
         <span class="tiny muted">${esc(w.date)} · ${STATS.setCount(w)} sets · ${Math.round(STATS.tonnage(w)).toLocaleString()} lb</span>
       </div>
-      <button class="btn sm ghost" data-act="del-workout" data-id="${esc(w.id)}">Delete</button>
+      ${w.grade ? `<span class="pill" style="background:var(--surface-2);color:${gradeColor(w.grade.score)}">${w.grade.score}</span>` : ''}
+      <span class="faint" aria-hidden="true">›</span>
     </div>`).join('')}
+    <p class="tiny faint" style="margin-bottom:0">Tap a session to look back at it.</p>
   </div>`;
 }
 
@@ -877,14 +940,22 @@ function moreView() {
         <div class="grow"><b>${esc(S.program.name || 'Current block')}</b>
         <span class="tiny muted">${S.program.weeks?.length || 0} weeks · ${S.program.days?.length || S.program.weeks?.[0]?.days?.length || 0} days a week</span></div>
       </div>` : '<p class="muted tiny" style="margin-top:0">No program yet.</p>'}
-      <button class="btn primary wide" data-act="go-program" style="margin-top:8px">
-        ${S.program ? 'Rebuild program' : 'Build a program'}</button>
+      ${S.program ? '<button class="btn primary wide" data-act="edit-program" style="margin-top:8px">Edit this plan</button>' : ''}
+      <button class="btn ${S.program ? 'ghost wide sm' : 'primary wide'}" data-act="go-program" style="margin-top:8px">
+        ${S.program ? 'Rebuild it from scratch' : 'Build a program'}</button>
     </div>
 
     <div class="card">
       <div class="card-title row"><span>Equipment</span>
         <button class="btn sm" data-act="edit-equipment">Edit</button></div>
       <div class="tiny muted">${equip.length} items · ${EX.availableExercises(equip).length} exercises available</div>
+      <hr class="sep">
+      <button class="btn wide sm" data-act="scan-machine" ${aiOn ? '' : 'disabled'}>Add a machine by photo</button>
+      ${(S.profile?.customExercises || []).map((c) => `<div class="list-row">
+        <div class="grow"><b class="ellip">${esc(c.name)}</b>
+          <span class="tiny muted">${esc((c.primary || []).map((m) => EX.MUSCLE_LABELS[m]).join(', '))}</span></div>
+        <button class="btn sm ghost" data-act="del-custom" data-id="${esc(c.id)}" style="color:var(--bad)">Remove</button>
+      </div>`).join('')}
     </div>
 
     <div class="card">
@@ -933,13 +1004,14 @@ function moreView() {
 const ICONS = {
   today: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   body: '<circle cx="12" cy="5" r="2.6"/><path d="M12 8v7M12 15l-3 6M12 15l3 6M6 10h12"/>',
+  cardio: '<path d="M20.5 6.5a4 4 0 0 0-6.5-1.3L12 7l-2-1.8A4 4 0 1 0 4.5 11L12 19l7.5-8a4 4 0 0 0 1-4.5z"/>',
   food: '<path d="M6 3v8a3 3 0 0 0 6 0V3M9 3v18M18 3c-1.5 2-2 4-2 6s.5 3 2 3v9"/>',
   stats: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
   more: '<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
 };
 
 const tabBar = () => `<nav class="tabs">${
-  ['today', 'body', 'food', 'stats', 'more'].map((t) => `
+  ['today', 'body', 'cardio', 'food', 'stats', 'more'].map((t) => `
     <button data-tab="${t}" ${S.tab === t ? 'aria-current="page"' : ''}>
       <svg viewBox="0 0 24 24">${ICONS[t]}</svg>
       <span>${t[0].toUpperCase() + t.slice(1)}</span>
@@ -1273,6 +1345,13 @@ const ACTIONS = {
     S.session = null; render();
   },
 
+  /* Walking away is the normal case, not the exception: you rack the bar, you
+     go to the bathroom, the phone locks. The session stays exactly where it
+     was, on this device, until it is finished or explicitly thrown away. */
+  'pause-session': () => { S.session.paused = true; render(); },
+  'resume-session': () => { S.session.paused = false; render(); },
+  'back-to-session': () => { S.tab = 'today'; if (S.session) S.session.paused = false; render(); },
+
   'add-set': (el) => {
     const entry = S.session.entries[+el.dataset.i];
     const last = entry.sets[entry.sets.length - 1];
@@ -1287,22 +1366,22 @@ const ACTIONS = {
   },
 
   'add-exercise': () => {
-    const equipment = activeEquipment();
-    const list = EX.availableExercises(equipment);
-    openSheet('Add exercise', `
-      <div class="field"><input id="ex-q" placeholder="Search exercises" autocomplete="off"
-        oninput="window.__filterEx(this.value)"></div>
-      <div id="ex-list">${exerciseRows(list.slice(0, 60))}</div>`);
-    window.__allEx = list;
-    window.__filterEx = (q) => {
-      const t = q.trim().toLowerCase();
-      const hits = t ? list.filter((e) => e.name.toLowerCase().includes(t)) : list;
-      $('#ex-list').innerHTML = exerciseRows(hits.slice(0, 60));
-    };
+    pickFor = { kind: 'session' };
+    openPicker('Add exercise', EX.availableExercises(activeEquipment()));
   },
 
+  /* One picker serves the live session and the plan editor. `pickFor` says
+     where the choice lands; without it the two would need duplicate sheets and
+     duplicate search boxes that drift apart. */
   'choose-ex': (el) => {
     const id = el.dataset.id;
+
+    if (pickFor?.kind === 'plan') {
+      planEdit[pickFor.day].blocks.push({ exerciseId: id, sets: 3, repMin: 8, repMax: 12 });
+      planEditSheet();
+      return;
+    }
+
     if (!S.session) S.session = { name: 'Workout', startedAt: Date.now(), entries: [] };
     const last = lastPerformance(id);
     S.session.entries.push({
@@ -1318,10 +1397,16 @@ const ACTIONS = {
     const entry = S.session.entries[i];
     const opts = EX.findSwaps(entry.exerciseId, activeEquipment());
     if (!opts.length) return toast('No swap available with your equipment', 'warn');
-    openSheet('Swap exercise', exerciseRows(opts.slice(0, 30), i));
+    pickFor = { kind: 'session-swap', index: i };
+    openPicker('Swap exercise', opts.slice(0, 30), i);
   },
 
   'do-swap': (el) => {
+    if (pickFor?.kind === 'plan-swap') {
+      planEdit[pickFor.day].blocks[pickFor.index].exerciseId = el.dataset.id;
+      planEditSheet();
+      return;
+    }
     S.session.entries[+el.dataset.i].exerciseId = el.dataset.id;
     closeSheet();
   },
@@ -1330,6 +1415,10 @@ const ACTIONS = {
     if (!confirm('Delete this session?')) return;
     await W.removeEntry('workouts', el.dataset.id);
     S.workouts = S.workouts.filter((w) => w.id !== el.dataset.id);
+    /* The review sheet may be showing the session that just went away. A plain
+       render would redraw it from a workout that no longer exists. */
+    S.sheet = null;
+    await publishScore();
     render();
   }),
 
@@ -1590,6 +1679,192 @@ const ACTIONS = {
       <button class="btn primary wide" type="submit">Save</button>
     </form>`),
 
+  /* ---------- looking back at a session ---------- */
+
+  'view-workout': (el) => reviewSheet(el.dataset.id),
+
+  'grade-session': (el) => guard(async () => {
+    const id = el.dataset.id;
+    const w = S.workouts.find((x) => x.id === id);
+    if (!w) return;
+
+    const slot = $('#grade-slot');
+    if (slot) slot.innerHTML = '<div class="center" style="padding:18px"><span class="spinner"></span></div>';
+
+    const grade = await AI.gradeWorkout({
+      text: workoutText(w),
+      goalLabel: PROG.GOALS[S.profile?.goal]?.label,
+      profile: S.profile || {},
+      history: recentHistoryText(id),
+    });
+
+    /* Stored on the session, not recomputed on every view: it costs a Groq call
+       and the answer would drift between renders of the same workout. */
+    await W.updateEntry('workouts', id, { grade });
+    w.grade = grade;
+
+    const after = $('#grade-slot');
+    if (after) after.innerHTML = gradeBlock(w);
+    else render();
+  }, 'The coach could not grade that'),
+
+  /* ---------- editing the plan ---------- */
+
+  'edit-program': () => {
+    if (!S.program) return toast('Build a program first', 'warn');
+    planEdit = programDays();
+    planEditSheet();
+  },
+
+  'ped-del': (el) => {
+    planEdit[+el.dataset.d].blocks.splice(+el.dataset.i, 1);
+    $('#ped-body').innerHTML = planEditBody();
+  },
+
+  'ped-add': (el) => {
+    pickFor = { kind: 'plan', day: +el.dataset.d };
+    openPicker('Add to this day', EX.availableExercises(activeEquipment()));
+  },
+
+  'ped-swap': (el) => {
+    const d = +el.dataset.d, i = +el.dataset.i;
+    const opts = EX.findSwaps(planEdit[d].blocks[i].exerciseId, activeEquipment());
+    if (!opts.length) return toast('No swap available with your equipment', 'warn');
+    pickFor = { kind: 'plan-swap', day: d, index: i };
+    openPicker('Swap exercise', opts.slice(0, 30));
+  },
+
+  'save-plan-edit': () => guard(async () => {
+    const days = planEdit.filter((d) => d.blocks.length);
+    if (!days.length) return toast('A plan needs at least one exercise', 'warn');
+    await saveDays(days, 'Plan updated');
+    planEdit = null;
+    closeSheet();
+  }, 'Could not save the plan'),
+
+  /* ---------- the cardio timer ---------- */
+
+  'timer-mode': (el) => {
+    /* No timer running yet, so this only chooses what the next one will be.
+       Held on the profile so tomorrow opens on the same machine. */
+    S.profile = { ...(S.profile || {}), lastCardioMode: el.dataset.val };
+    render();
+  },
+
+  'timer-start': (el) => {
+    const mode = el.dataset.val;
+    S.timer = { mode, startedAt: Date.now(), since: Date.now(), accum: 0, running: true };
+    render();
+  },
+
+  'timer-pause': () => {
+    S.timer.accum = timerMs();
+    S.timer.running = false;
+    render();
+  },
+
+  'timer-resume': () => {
+    S.timer.since = Date.now();
+    S.timer.running = true;
+    render();
+  },
+
+  'timer-stop': () => {
+    const minutes = Math.max(1, Math.round(timerMs() / 60000));
+    const mode = S.timer.mode;
+    S.timer = null;
+    render();
+    cardioFinishSheet(minutes, mode);
+  },
+
+  'timer-discard': () => {
+    if (!confirm('Throw this away? Nothing will be logged.')) return;
+    S.timer = null; render();
+  },
+
+  'log-class': (el) => classSheet(el.dataset.val),
+
+  'del-cardio': (el) => guard(async () => {
+    await W.removeEntry('cardio', el.dataset.id);
+    S.cardio = S.cardio.filter((c) => c.id !== el.dataset.id);
+    await publishScore();
+    render();
+  }),
+
+  /* Core work opens the ordinary logger, filtered to core movements. It is
+     resistance training and belongs in the workout history: logged as cardio
+     minutes it would earn cardio points and contribute nothing to the body
+     map, which is exactly backwards. */
+  'quick-core': () => {
+    if (!S.session) S.session = { name: 'Core', startedAt: Date.now(), entries: [] };
+    S.tab = 'today';
+    render();
+    pickFor = { kind: 'session' };
+    openPicker('Add core work', EX.CORE_EXERCISES(activeEquipment()));
+  },
+
+  /* ---------- photographing a machine ---------- */
+
+  'scan-machine': () => openSheet('Add a machine by photo', `
+    <p class="tiny muted" style="margin-top:0">Point the camera at the name plate on the side of the
+    machine. The plate is what gets read, so a clear shot of the label beats a shot of the whole rig.</p>
+    <form id="machine-form">
+      <div class="field"><label for="mf-file">Photo</label>
+        <input id="mf-file" name="file" type="file" accept="image/*" capture="environment" required></div>
+      <button class="btn primary wide" type="submit">Read the machine</button>
+    </form>
+    <p class="tiny faint">You get to check and rename it before anything is saved.</p>`),
+
+  'save-machine': () => guard(async () => {
+    const m = machineDraft;
+    if (!m) return;
+
+    const name = ($('#mc-name')?.value || m.name).trim();
+    if (!name) return toast('Give it a name first', 'warn');
+    const pattern = $('#mc-pattern')?.value || m.pattern;
+    const primary = [...document.querySelectorAll('[data-mc-muscle][aria-pressed="true"]')]
+      .map((b) => b.dataset.mcMuscle);
+    if (!primary.length) return toast('Pick at least one muscle', 'warn');
+
+    const custom = {
+      id: EX.customId(name),
+      name,
+      pattern,
+      type: primary.length > 1 ? 'compound' : 'isolation',
+      primary,
+      secondary: m.secondary.filter((x) => !primary.includes(x)),
+      equipment: m.equipmentIds,
+    };
+
+    const existing = S.profile?.customExercises || [];
+    if (existing.some((e) => e.id === custom.id)) return toast('That one is already in your list', 'warn');
+
+    const customExercises = [...existing, custom];
+    /* Equipment ids the machine implies are ticked off too, so the built-in
+       exercises that need them stop being filtered out. */
+    const equipment = [...new Set([...activeEquipment(), ...m.equipmentIds])];
+    const gymProfiles = [{ id: 'main', name: 'My gym', equipment }];
+
+    await W.saveProfile({ customExercises, gymProfiles, activeGym: 'main' });
+    Object.assign(S.profile, { customExercises, gymProfiles, activeGym: 'main' });
+    EX.registerCustom([custom]);
+
+    machineDraft = null;
+    closeSheet();
+    toast(`${name} added`, 'ok');
+  }, 'Could not save that machine'),
+
+  'del-custom': (el) => guard(async () => {
+    const id = el.dataset.id;
+    const customExercises = (S.profile?.customExercises || []).filter((e) => e.id !== id);
+    await W.saveProfile({ customExercises });
+    S.profile.customExercises = customExercises;
+    /* The in-memory library keeps it until reload on purpose: removing it now
+       would break any logged session that still references it. */
+    toast('Removed. It will disappear from the picker next time the app opens.', 'ok');
+    render();
+  }),
+
   'finish-session': () => guard(async () => {
     const s = S.session;
     /* A set with reps in it WAS performed, whether or not the tick was tapped.
@@ -1621,21 +1896,41 @@ const ACTIONS = {
     S.workouts = [saved, ...S.workouts];
     S.session = null;
     await publishScore();
-    render();
 
-    if (prs.length) {
-      openSheet('New personal record', `
-        <div class="center" style="padding:10px 0 6px"><div style="font-size:44px">🏆</div></div>
-        ${prs.map((p) => `<div class="center" style="margin-bottom:14px">
-          <div class="card-title" style="margin-bottom:4px">${esc(p.name)}</div>
-          <div class="stat">${round(p.value, 1)} <small>${p.kind === 'weight' ? 'lb' : 'lb est. max'}</small></div>
-          ${p.previous ? `<div class="tiny faint">previous best ${round(p.previous, 1)}</div>` : '<div class="tiny faint">first time logged</div>'}
-        </div>`).join('')}`);
-    } else {
-      toast('Session saved', 'ok');
+    /* What you actually did becomes the plan. Changing exercises mid-session is
+       not a deviation to be corrected next week, it is the new intent. */
+    if (s.plannedDay != null) {
+      try { await syncDayFromSession(saved, s.plannedDay); }
+      catch (err) { console.warn('could not update the day template', err); }
     }
+
+    render();
+    reviewSheet(saved.id, { prs, autoGrade: true });
   }, 'Could not save the session'),
 };
+
+/* Where the next exercise choice should land. */
+let pickFor = { kind: 'session' };
+
+/**
+ * The shared exercise picker.
+ *
+ * The search box filters in place rather than re-rendering, because a render
+ * would rebuild the input and drop focus after the first keystroke.
+ */
+function openPicker(title, list, swapIndex) {
+  openSheet(title, `
+    <div class="field"><input id="ex-q" placeholder="Search exercises" autocomplete="off"
+      oninput="window.__filterEx(this.value)"></div>
+    <div id="ex-list">${exerciseRows(list.slice(0, 60), swapIndex)}</div>`);
+
+  window.__filterEx = (q) => {
+    const t = q.trim().toLowerCase();
+    const hits = t ? list.filter((e) => e.name.toLowerCase().includes(t)) : list;
+    const target = $('#ex-list');
+    if (target) target.innerHTML = exerciseRows(hits.slice(0, 60), swapIndex);
+  };
+}
 
 const exerciseRows = (list, swapIndex) => list.map((e) => `
   <div class="list-row">
@@ -1753,12 +2048,31 @@ function wire(root) {
     if (sel) { S.statLift = sel.value; render(); }
   });
 
+  root.addEventListener('click', (ev) => {
+    const muscle = ev.target.closest('[data-mc-muscle]');
+    if (muscle) muscle.setAttribute('aria-pressed', muscle.getAttribute('aria-pressed') !== 'true');
+  });
+
   root.addEventListener('input', (ev) => {
+    /* The plan editor writes straight into the working copy. No re-render, for
+       the same reason the set fields do not: it would blur the field. */
+    const ped = ev.target.closest('[data-ped]');
+    if (ped && planEdit) {
+      const day = planEdit[+ped.dataset.d];
+      if (day) {
+        if (ped.dataset.ped === 'name') day.name = ped.value;
+        else if (day.blocks[+ped.dataset.i]) day.blocks[+ped.dataset.i][ped.dataset.ped] = num(ped.value, 1);
+      }
+      return;
+    }
+
     const f = ev.target.closest('[data-set]');
     if (f && S.session) {
       const set = S.session.entries[+f.dataset.i].sets[+f.dataset.j];
       set[f.dataset.set] = f.value;
-      /* Deliberately no re-render: it would blur the field mid-typing. */
+      /* Deliberately no re-render: it would blur the field mid-typing. Which
+         means this is the one mutation render() cannot persist for us. */
+      stash(draftKey(), S.session);
     }
   });
 
@@ -1906,6 +2220,52 @@ const FORMS = {
     toast('Cardio logged', 'ok');
   },
 
+  'cardio-timer-form': async (d) => {
+    const c = {
+      date: todayKey(), exerciseId: d.exerciseId,
+      minutes: num(d.minutes), distance: num(d.distance) || null,
+    };
+    const id = await W.addEntry('cardio', c);
+    S.cardio = [{ id, ...c }, ...S.cardio];
+    await W.saveProfile({ lastCardioMode: d.exerciseId });
+    S.profile.lastCardioMode = d.exerciseId;
+    await publishScore();
+    closeSheet();
+    toast('Cardio logged', 'ok');
+  },
+
+  'class-form': async (d) => {
+    const c = {
+      date: todayKey(), kind: 'class', classId: d.classId,
+      name: EX.CLASS_BY_ID[d.classId]?.label || 'Class',
+      minutes: num(d.minutes),
+      studio: (d.studio || '').trim() || null,
+      note: (d.note || '').trim() || null,
+    };
+    const id = await W.addEntry('cardio', c);
+    S.cardio = [{ id, ...c }, ...S.cardio];
+    await publishScore();
+    closeSheet();
+    toast(`${c.name} logged`, 'ok');
+  },
+
+  'machine-form': async (d, form) => {
+    const file = form.querySelector('input[type=file]').files[0];
+    if (!file) return;
+    form.insertAdjacentHTML('afterend',
+      '<div class="center" id="mf-wait" style="padding:14px"><span class="spinner"></span></div>');
+
+    /* Compressed before it leaves the phone: the Worker caps the upload and a
+       modern camera photo is several times that cap on its own. */
+    const { dataUrl } = await DB.compressImage(file, { maxSize: 900, maxBytes: 140_000 });
+    machineDraft = await AI.identifyMachine(dataUrl, {
+      equipment: EX.ALL_EQUIPMENT.map((id) => ({ id, label: EX.EQUIPMENT_LABELS[id] })),
+      muscles: EX.MUSCLES.map((id) => ({ id, label: EX.MUSCLE_LABELS[id] })),
+    });
+    document.getElementById('mf-wait')?.remove();
+    machineConfirmSheet();
+  },
+
   'import-form': async (d, form) => {
     const file = form.querySelector('input[type=file]').files[0];
     if (!file) return;
@@ -2026,12 +2386,467 @@ function bootDemo() {
   const template = buildTemplate(S.profile);
   S.program = { ...PROG.expandProgram(template, { weeks: 5 }), id: 'current', startDate: SCORE.dayKey(new Date(Date.now() - 9 * 86400000)) };
 
+  EX.registerCustom(S.profile.customExercises || []);
+  S.session = unstash(draftKey());
+  S.timer = unstash(timerKey());
+
   /* Every write becomes a no-op so the demo cannot reach the network. */
   for (const k of Object.keys(W)) W[k] = async () => 'demo';
 
   /* Demo only: exposes state so a browser session can inspect it. */
   window.__S = S;
   render();
+}
+
+
+/* ============================== unfinished session ============================== */
+
+function pausedCard() {
+  const s = S.session;
+  const done = s.entries.reduce((n, e) => n + e.sets.filter((x) => num(x.reps) > 0).length, 0);
+  return `<div class="card">
+    <div class="card-title row">
+      <span>${esc(s.name || 'Workout')} in progress</span>
+      <span class="faint tiny">${elapsed(s.startedAt)}</span>
+    </div>
+    <p class="muted tiny" style="margin-top:0">${plural(done, 'set', 'sets')} logged so far.
+    Nothing reaches your history until you finish.</p>
+    <button class="btn primary wide" data-act="resume-session">Pick up where I left off</button>
+    <button class="btn ghost wide sm" data-act="cancel-session" style="margin-top:8px;color:var(--bad)">Discard it</button>
+  </div>`;
+}
+
+/* ============================== overload notes ============================== */
+
+/*
+ * Only shown when there is something to say. A card that reads "nothing to
+ * report" every day is a card people stop reading, and then they miss the day
+ * it does say something.
+ */
+function overloadCard() {
+  const notes = PROG.overloadSuggestions(S.workouts);
+  if (!notes.length) return '';
+
+  return `<div class="card">
+    <div class="card-title">Time to add weight</div>
+    ${notes.slice(0, 4).map((n) => {
+      const ex = EX.BY_ID[n.exerciseId];
+      if (!ex) return '';
+      return `<div class="list-row">
+        <div class="grow">
+          <b class="ellip">${esc(ex.name)}</b>
+          <span class="tiny muted">${round(n.weight, 1)} lb for ${plural(n.sessions, 'session', 'sessions')}
+            over ${plural(n.days, 'day', 'days')}</span>
+        </div>
+        <span class="pill" style="background:var(--surface-2);color:${n.ready ? 'var(--ok)' : 'var(--dim)'}">
+          ${n.ready ? `&rarr; ${round(n.suggested, 1)} lb` : `${n.bestReps} of ${n.repTarget} reps`}
+        </span>
+      </div>`;
+    }).join('')}
+    <p class="tiny faint" style="margin-bottom:0">A weight means you have earned the jump.
+    A rep count means finish the range you are on first.</p>
+  </div>`;
+}
+
+/* ============================== session review ============================== */
+
+/* Bands, not a gradient: a 78 and an 81 are the same session, and colouring
+   them differently would invent a distinction the score does not carry. */
+const gradeColor = (n) => (n >= 85 ? 'var(--ok)' : n >= 70 ? 'var(--accent)' : n >= 50 ? 'var(--warn)' : 'var(--bad)');
+
+const gradeWord = (n) => (n >= 85 ? 'Excellent' : n >= 70 ? 'Solid' : n >= 50 ? 'Fair' : 'Weak');
+
+/** The session as prose, because exercise ids mean nothing to a language model. */
+function workoutText(w) {
+  const mins = w.endedAt && w.startedAt ? Math.round((w.endedAt - w.startedAt) / 60000) : null;
+  const lines = (w.entries || []).map((e) => {
+    const ex = EX.BY_ID[e.exerciseId];
+    const sets = e.sets.map((x) => `${num(x.weight) ? `${round(num(x.weight), 1)}lb` : 'bodyweight'} x ${num(x.reps)}`).join(', ');
+    const muscles = (ex?.primary || []).map((m) => EX.MUSCLE_LABELS[m]).join('/');
+    return `- ${ex?.name || e.exerciseId}${muscles ? ` (${muscles})` : ''}: ${sets}`;
+  });
+  return [
+    `${w.name || 'Workout'} on ${w.date}${mins ? `, ${mins} minutes` : ''}`,
+    ...lines,
+    `Total volume ${Math.round(STATS.tonnage(w)).toLocaleString()} lb across ${STATS.setCount(w)} sets.`,
+  ].join('\n');
+}
+
+/** The last few sessions, one line each, so the grade can see a trend. */
+function recentHistoryText(excludeId) {
+  return S.workouts.filter((w) => w.id !== excludeId).slice(0, 6)
+    .map((w) => `${w.date}: ${w.name || 'Workout'}, ${STATS.setCount(w)} sets, ${Math.round(STATS.tonnage(w)).toLocaleString()} lb`)
+    .join('\n');
+}
+
+function reviewBody(w, prs = []) {
+  const mins = w.endedAt && w.startedAt ? Math.round((w.endedAt - w.startedAt) / 60000) : null;
+
+  return `
+    ${prs.length ? `<div class="card tight center" style="margin-bottom:12px">
+      <div style="font-size:34px">&#127942;</div>
+      ${prs.map((p) => `<div style="margin-bottom:8px">
+        <div class="card-title" style="margin-bottom:2px">${esc(p.name)}</div>
+        <div class="stat">${round(p.value, 1)} <small>${p.kind === 'weight' ? 'lb' : 'lb est. max'}</small></div>
+        ${p.previous ? `<div class="tiny faint">previous best ${round(p.previous, 1)}</div>`
+          : '<div class="tiny faint">first time logged</div>'}
+      </div>`).join('')}
+    </div>` : ''}
+
+    <div class="row" style="gap:18px;margin-bottom:14px">
+      <div><div class="stat">${STATS.setCount(w)}</div><div class="tiny faint">sets</div></div>
+      <div><div class="stat">${Math.round(STATS.tonnage(w)).toLocaleString()}</div><div class="tiny faint">lb moved</div></div>
+      ${mins ? `<div><div class="stat">${mins}</div><div class="tiny faint">minutes</div></div>` : ''}
+    </div>
+
+    <div id="grade-slot">${gradeBlock(w)}</div>
+
+    ${(w.entries || []).map((e) => {
+      const ex = EX.BY_ID[e.exerciseId];
+      return `<div style="margin-bottom:14px">
+        <b>${esc(ex?.name || e.exerciseId)}</b>
+        ${e.sets.map((x, i) => `<div class="list-row" style="padding:4px 0;border:0">
+          <span class="faint tiny" style="width:16px">${i + 1}</span>
+          <span class="grow tiny">${num(x.weight) ? `${round(num(x.weight), 1)} lb` : 'bodyweight'} &times; ${num(x.reps)}</span>
+          <span class="tiny faint">${num(x.weight) ? `${round(PROG.epley(num(x.weight), num(x.reps)), 0)} e1RM` : ''}</span>
+        </div>`).join('')}
+      </div>`;
+    }).join('')}
+
+    <hr class="sep">
+    <button class="btn ghost wide sm" data-act="del-workout" data-id="${esc(w.id)}" style="color:var(--bad)">Delete this session</button>`;
+}
+
+function gradeBlock(w) {
+  const g = w.grade;
+  if (!g) {
+    return `<div class="card tight" style="margin-bottom:12px">
+      <div class="card-title" style="margin-bottom:4px">Coach's grade</div>
+      <p class="tiny muted" style="margin-top:0">Scored out of 100 against your goal, with what to change next time.</p>
+      <button class="btn wide sm" data-act="grade-session" data-id="${esc(w.id)}"
+        ${AI.isConfigured() ? '' : 'disabled'}>Grade this session</button>
+      ${AI.isConfigured() ? '' : '<p class="tiny faint" style="margin-bottom:0">The coach is not connected yet.</p>'}
+    </div>`;
+  }
+
+  const alignLabel = { yes: 'On plan for your goal', partly: 'Partly on plan', no: 'Off plan for your goal' }[g.aligned] || '';
+  return `<div class="card tight" style="margin-bottom:12px">
+    <div class="row" style="align-items:center;gap:14px">
+      <div style="font:800 40px/1 system-ui;letter-spacing:-.04em;color:${gradeColor(g.score)}">${g.score}</div>
+      <div class="grow">
+        <b>${gradeWord(g.score)}</b>
+        <div class="tiny muted">${esc(alignLabel)}</div>
+      </div>
+    </div>
+    <p class="tiny" style="margin:10px 0 0">${esc(g.headline || '')}</p>
+    ${(g.strengths || []).length ? `<div style="margin-top:10px">
+      <div class="tiny faint">What worked</div>
+      ${g.strengths.map((t) => `<div class="tiny">&bull; ${esc(t)}</div>`).join('')}
+    </div>` : ''}
+    ${(g.fixes || []).length ? `<div style="margin-top:10px">
+      <div class="tiny faint">Next time</div>
+      ${g.fixes.map((t) => `<div class="tiny">&bull; ${esc(t)}</div>`).join('')}
+    </div>` : ''}
+    ${g.longTerm ? `<p class="tiny faint" style="margin:10px 0 0">${esc(g.longTerm)}</p>` : ''}
+    <button class="btn ghost wide sm" data-act="grade-session" data-id="${esc(w.id)}" style="margin-top:10px">Grade it again</button>
+  </div>`;
+}
+
+function reviewSheet(id, { prs = [], autoGrade = false } = {}) {
+  const w = S.workouts.find((x) => x.id === id);
+  if (!w) return;
+  openSheet(`${w.name || 'Workout'} · ${w.date}`, reviewBody(w, prs));
+  if (autoGrade && AI.isConfigured() && !w.grade) ACTIONS['grade-session']({ dataset: { id } });
+}
+
+/* ============================== plan editing ============================== */
+
+/** The program's day TEMPLATES, detached so edits cannot mutate live state. */
+const programDays = () => JSON.parse(JSON.stringify(
+  S.program?.days || S.program?.weeks?.[0]?.days || [],
+));
+
+/** Re-expand a set of edited day templates and store the result. */
+async function saveDays(days, message) {
+  const template = {
+    id: 'current',
+    name: S.program?.name || 'Custom plan',
+    goal: S.profile?.goal,
+    days,
+    startDate: S.program?.startDate || todayKey(),
+  };
+  const program = { ...PROG.expandProgram(template, { weeks: 5 }), id: 'current', startDate: template.startDate };
+  await W.saveProgram(program);
+  S.program = program;
+  if (message) toast(message, 'ok');
+}
+
+const blockKey = (b) => `${b.exerciseId}:${b.sets}:${b.repMin}-${b.repMax}`;
+const sameBlocks = (a, b) => a.length === b.length && a.every((x, i) => blockKey(x) === blockKey(b[i]));
+
+/**
+ * Rewrite a day template to match what was actually done.
+ *
+ * Swapping an exercise mid-session is a decision, not a slip, so the plan
+ * follows the person rather than the other way round. The rep range is left
+ * alone when the reps landed inside it: hitting 9 in an 8-12 range should not
+ * quietly narrow that range to 9-9 and freeze progression.
+ */
+async function syncDayFromSession(workout, dayIndex) {
+  const days = programDays();
+  const day = days[dayIndex];
+  if (!day) return;
+
+  const blocks = workout.entries.map((e) => {
+    const reps = e.sets.map((x) => num(x.reps)).filter((r) => r > 0);
+    const prior = day.blocks.find((b) => b.exerciseId === e.exerciseId);
+    const lo = Math.min(...reps);
+    const hi = Math.max(...reps);
+    const insidePrior = prior && lo >= prior.repMin && hi <= prior.repMax;
+    return {
+      exerciseId: e.exerciseId,
+      sets: e.sets.length,
+      repMin: insidePrior ? prior.repMin : lo,
+      repMax: insidePrior ? prior.repMax : Math.max(hi, lo + 2),
+    };
+  });
+
+  if (!blocks.length || sameBlocks(day.blocks, blocks)) return;
+  days[dayIndex] = { ...day, blocks };
+  await saveDays(days, `"${day.name || 'That day'}" now matches what you did`);
+}
+
+/* The working copy for the editor, at module scope so the sheet can be
+   repainted in place. Same reason planChat lives out here. */
+let planEdit = null;
+
+const repInput = (value, field, d, i, label) => `<input type="number" inputmode="numeric" min="1" max="50"
+  value="${value}" data-ped="${field}" data-d="${d}" data-i="${i}" aria-label="${label}"
+  style="width:54px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:6px;min-height:38px">`;
+
+function planEditBody() {
+  if (!planEdit?.length) return '<div class="empty tiny">This program has no days in it.</div>';
+
+  return planEdit.map((day, d) => `
+    <div class="card tight" style="margin-bottom:12px">
+      <div class="field" style="margin-bottom:10px">
+        <input value="${esc(day.name || `Day ${d + 1}`)}" data-ped="name" data-d="${d}"
+          aria-label="Day name" style="font-weight:700">
+      </div>
+      ${day.blocks.length ? day.blocks.map((b, i) => {
+        const ex = EX.BY_ID[b.exerciseId];
+        return `<div class="list-row" style="gap:6px;align-items:flex-start">
+          <div class="grow" style="min-width:0">
+            <b class="ellip">${esc(ex?.name || b.exerciseId)}</b>
+            <div class="row" style="gap:6px;margin-top:6px;align-items:center">
+              ${repInput(b.sets, 'sets', d, i, 'Sets')}
+              <span class="tiny faint">sets of</span>
+              ${repInput(b.repMin, 'repMin', d, i, 'Minimum reps')}
+              <span class="tiny faint">to</span>
+              ${repInput(b.repMax, 'repMax', d, i, 'Maximum reps')}
+            </div>
+          </div>
+          <button class="btn sm ghost" data-act="ped-swap" data-d="${d}" data-i="${i}">Swap</button>
+          <button class="btn sm ghost" data-act="ped-del" data-d="${d}" data-i="${i}" style="color:var(--bad)">Remove</button>
+        </div>`;
+      }).join('') : '<div class="empty tiny">No exercises on this day.</div>'}
+      <button class="btn sm ghost wide" data-act="ped-add" data-d="${d}" style="margin-top:10px">+ add exercise</button>
+    </div>`).join('');
+}
+
+function planEditSheet() {
+  openSheet('Edit your plan', `<div id="ped-body">${planEditBody()}</div>
+    <p class="tiny faint">Changes apply from today onwards. Weeks are rebuilt around them,
+    so progression and the deload still line up.</p>`,
+  `<button class="btn primary wide" data-act="save-plan-edit">Save changes</button>`);
+}
+
+/* ============================== cardio ============================== */
+
+/*
+ * The timer is a stored object, not a running interval.
+ *
+ * It keeps when the current run began and how much time was banked before the
+ * last pause, so elapsed time is DERIVED from the clock rather than counted up.
+ * That is what lets it survive a locked phone, a backgrounded tab and a full
+ * reload, none of which let a setInterval keep counting.
+ */
+let tickHandle = null;
+
+const timerMs = () => (S.timer
+  ? num(S.timer.accum) + (S.timer.running ? Date.now() - num(S.timer.since) : 0)
+  : 0);
+
+const clockText = (ms) => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return `${h ? `${h}:` : ''}${mm}:${String(sec).padStart(2, '0')}`;
+};
+
+/** Repaint just the clock. A full render every second would blur any focused
+    field and rebuild the whole screen sixty times a minute for one number. */
+function startTicking() {
+  if (tickHandle) return;
+  tickHandle = setInterval(() => {
+    if (!S.timer?.running) { clearInterval(tickHandle); tickHandle = null; return; }
+    const el = document.getElementById('cd-clock');
+    if (el) el.textContent = clockText(timerMs());
+  }, 1000);
+}
+
+const cardioLabel = (c) => (c.kind === 'class'
+  ? (EX.CLASS_BY_ID[c.classId]?.label || c.name || 'Class')
+  : (EX.BY_ID[c.exerciseId]?.name || c.name || 'Cardio'));
+
+function cardioView() {
+  const t = S.timer;
+  const mode = t?.mode || S.profile?.lastCardioMode || 'treadmill_run';
+  const week = S.cardio.filter((c) => c.date >= SCORE.dayKey(SCORE.weekRange(thisWeek()).start));
+  const weekMin = week.reduce((n, c) => n + num(c.minutes), 0);
+
+  return `<div class="screen">
+    <div class="top">
+      <div><h1>Cardio</h1>
+        <div class="sub">${weekMin ? `${plural(weekMin, 'minute', 'minutes')} this week` : 'Nothing logged this week yet'}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">${t ? esc(EX.BY_ID[mode]?.name || 'Session') : 'Start a session'}</div>
+
+      ${t ? `
+        <div class="center" style="padding:12px 0 4px">
+          <div id="cd-clock" style="font:700 54px/1 system-ui;letter-spacing:-.04em;font-variant-numeric:tabular-nums">${clockText(timerMs())}</div>
+          <div class="tiny faint" style="margin-top:6px">${t.running ? 'running' : 'paused'}</div>
+        </div>
+        <div class="btn-row" style="margin-top:14px">
+          <button class="btn" data-act="${t.running ? 'timer-pause' : 'timer-resume'}">${t.running ? 'Pause' : 'Resume'}</button>
+          <button class="btn primary" data-act="timer-stop">Finish</button>
+        </div>
+        <button class="btn ghost wide sm" data-act="timer-discard" style="margin-top:8px;color:var(--bad)">Throw it away</button>
+      ` : `
+        <div class="chips" style="margin-bottom:14px">
+          ${EX.CARDIO_MODES().map((m) => `<button type="button" class="chip sm" data-act="timer-mode" data-val="${m.id}"
+            aria-pressed="${m.id === mode}">${esc(m.name)}</button>`).join('')}
+        </div>
+        <button class="btn primary wide" data-act="timer-start" data-val="${esc(mode)}">Start the clock</button>
+        <button class="btn ghost wide sm" data-act="quick-cardio" style="margin-top:8px">Log one I already did</button>
+      `}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Classes</div>
+      <p class="muted tiny" style="margin-top:0">Pilates, reformer, Solidcore, barre, spin. Logged by time,
+      because the instructor picks the work and there is no load to progress.</p>
+      <div class="chips">
+        ${EX.CLASS_TYPES.map((c) => `<button type="button" class="chip sm" data-act="log-class" data-val="${c.id}">${esc(c.label)}</button>`).join('')}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Abs and core</div>
+      <p class="muted tiny" style="margin-top:0">Logged as real sets and reps rather than minutes, so it
+      counts towards your volume and shows up on the body map. Abs are training, not cardio.</p>
+      <button class="btn wide" data-act="quick-core">Log a core session</button>
+    </div>
+
+    ${S.cardio.length ? `<div class="card">
+      <div class="card-title">Recent</div>
+      ${S.cardio.slice(0, 12).map((c) => `<div class="list-row">
+        <div class="grow">
+          <b class="ellip">${esc(cardioLabel(c))}</b>
+          <span class="tiny muted">${esc(c.date)} &middot; ${num(c.minutes)} min${
+            c.distance ? ` &middot; ${round(num(c.distance), 2)} mi` : ''}${
+            c.studio ? ` &middot; ${esc(c.studio)}` : ''}</span>
+        </div>
+        <button class="btn sm ghost" data-act="del-cardio" data-id="${esc(c.id)}" style="color:var(--bad)">Remove</button>
+      </div>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+
+function cardioFinishSheet(minutes, exerciseId) {
+  const ex = EX.BY_ID[exerciseId];
+  openSheet('Finish cardio', `
+    <div class="card tight"><b>${esc(ex?.name || 'Cardio')}</b>
+      <div class="tiny muted">${plural(minutes, 'minute', 'minutes')} on the clock</div></div>
+    <form id="cardio-timer-form">
+      <input type="hidden" name="exerciseId" value="${esc(exerciseId)}">
+      <div class="field-row">
+        <div class="field"><label for="ct-min">Minutes</label>
+          <input id="ct-min" name="minutes" type="number" inputmode="numeric" value="${minutes}" required></div>
+        ${EX.tracksDistance(exerciseId) ? `<div class="field"><label for="ct-dist">Distance (mi)</label>
+          <input id="ct-dist" name="distance" type="number" inputmode="decimal" step="0.01"></div>` : ''}
+      </div>
+      <button class="btn primary wide" type="submit">Save it</button>
+    </form>`);
+}
+
+function classSheet(classId) {
+  const cls = EX.CLASS_BY_ID[classId];
+  if (!cls) return;
+  openSheet(cls.label, `
+    <form id="class-form">
+      <input type="hidden" name="classId" value="${esc(classId)}">
+      <div class="field-row">
+        <div class="field"><label for="cl-min">Minutes</label>
+          <input id="cl-min" name="minutes" type="number" inputmode="numeric" value="50" required></div>
+        <div class="field"><label for="cl-studio">Studio <span class="faint">(optional)</span></label>
+          <input id="cl-studio" name="studio" autocomplete="off" placeholder="Solidcore Fort Worth"></div>
+      </div>
+      <div class="field"><label for="cl-note">How was it? <span class="faint">(optional)</span></label>
+        <input id="cl-note" name="note" autocomplete="off" placeholder="Legs and core, brutal"></div>
+      <button class="btn primary wide" type="submit">Log it</button>
+    </form>`);
+}
+
+/* ============================== machine scan ============================== */
+
+/* Held at module scope because a sheet body is a snapshot: the parsed result
+   has to outlive the render that drew it. */
+let machineDraft = null;
+
+function machineConfirmSheet() {
+  const m = machineDraft;
+  if (!m) return;
+  const known = m.equipmentIds.map((id) => EX.EQUIPMENT_LABELS[id]).filter(Boolean);
+
+  openSheet('Is this right?', `
+    <div class="field">
+      <label for="mc-name">Call it</label>
+      <input id="mc-name" value="${esc(m.name)}" data-mc="name" autocomplete="off">
+    </div>
+    ${m.plateText ? `<p class="tiny faint" style="margin-top:-8px">Read off the machine: &ldquo;${esc(m.plateText)}&rdquo;</p>` : ''}
+
+    <div class="field">
+      <label for="mc-pattern">Movement</label>
+      <select id="mc-pattern" data-mc="pattern">
+        ${EX.PATTERNS.map((p) => `<option value="${p}" ${p === m.pattern ? 'selected' : ''}>${esc(EX.PATTERN_LABELS[p] || p)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Muscles it trains</label>
+      <div class="chips">
+        ${EX.MUSCLES.map((mu) => `<button type="button" class="chip sm" data-mc-muscle="${mu}"
+          aria-pressed="${m.primary.includes(mu)}">${esc(EX.MUSCLE_LABELS[mu])}</button>`).join('')}
+      </div>
+    </div>
+
+    ${known.length
+      ? `<p class="tiny muted">This also ticks <b>${esc(known.join(', '))}</b> off in your equipment,
+         which unlocks the built-in exercises that use it.</p>`
+      : `<p class="tiny muted">Nothing in the standard equipment list matched, so this is saved as its
+         own exercise. That is fine, it still logs and still counts towards your volume.</p>`}
+    ${m.note ? `<p class="tiny faint">${esc(m.note)}</p>` : ''}
+    ${m.confidence === 'low' ? '<div class="banner warn">The photo was hard to read. Check the name and the muscles before you save.</div>' : ''}
+
+    <button class="btn primary wide" data-act="save-machine" style="margin-top:6px">Add it to my gym</button>
+    <details style="margin-top:14px"><summary class="tiny faint">What the camera made of it</summary>
+      <p class="tiny faint">${esc(m.description)}</p></details>`);
 }
 
 /* ============================== boot ============================== */
@@ -2080,8 +2895,20 @@ async function boot() {
     try {
       S.profile = await DB.getProfile();
       findPartner();
+
+      /* Machines added by photo have to be in the library BEFORE anything
+         renders. Every screen resolves exercises through EX.BY_ID, so a logged
+         set referencing a custom id would otherwise draw as a raw slug. */
+      EX.registerCustom(S.profile?.customExercises || []);
+
       if (S.profile?.complete) {
         await loadAll();
+
+        /* A workout and a cardio timer both survive the app being closed. They
+           are restored here rather than at module load because the key is
+           per-account and there is no account until now. */
+        S.session = unstash(draftKey());
+        S.timer = unstash(timerKey());
         if (S.partnerUid) {
           DB.watchProfile(S.partnerUid, (p) => { S.partnerProfile = p; render(); });
           DB.watchCouple((c) => { S.couple = c; render(); });

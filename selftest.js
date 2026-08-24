@@ -745,6 +745,129 @@ section('anatomy');
   eq('freshness caps at 1', f.arms, 1);
 }
 
+/* ============================== progressive overload ============================== */
+
+{
+  section('overload suggestions');
+
+  /* One session per week at an unchanged 135, three weeks apart. Reps at the
+     top of the range, so the answer should be "add weight". */
+  const sess = (date, weight, reps) => ({
+    date, entries: [{ exerciseId: 'bench_press', sets: [{ weight, reps }, { weight, reps }] }],
+  });
+
+  const stalled = [sess('2026-08-01', 135, 10), sess('2026-08-08', 135, 10), sess('2026-08-15', 135, 11)];
+  const out = P.overloadSuggestions(stalled);
+  eq('a three-week plateau is flagged', out.length, 1);
+  eq('flags the right lift', out[0]?.exerciseId, 'bench_press');
+  eq('reports the stuck weight', out[0]?.weight, 135);
+  eq('counts every session in the run', out[0]?.sessions, 3);
+  eq('measures the span in days', out[0]?.days, 14);
+  check('top of the rep range means ready', out[0]?.ready === true);
+  eq('suggests one increment up', out[0]?.suggested, 135 + P.incrementFor('bench_press'));
+
+  /* Same plateau, but the reps never got there. Adding weight to a set you
+     cannot finish is how people get hurt, so this must NOT say add weight. */
+  const shortOfReps = [sess('2026-08-01', 135, 6), sess('2026-08-08', 135, 7), sess('2026-08-15', 135, 7)];
+  const short = P.overloadSuggestions(shortOfReps);
+  eq('a stall below the rep target still surfaces', short.length, 1);
+  check('but is not marked ready', short[0]?.ready === false);
+  eq('and suggests the same weight', short[0]?.suggested, 135);
+  eq('reporting the best reps reached', short[0]?.bestReps, 7);
+
+  /* Three sessions inside one week is not a plateau, it is a training week. */
+  const tooSoon = [sess('2026-08-10', 135, 10), sess('2026-08-12', 135, 10), sess('2026-08-14', 135, 10)];
+  eq('three sessions in four days is not a plateau', P.overloadSuggestions(tooSoon).length, 0);
+
+  /* Still climbing. The most recent weight differs, so the run is length one. */
+  const climbing = [sess('2026-08-01', 135, 10), sess('2026-08-08', 140, 10), sess('2026-08-15', 145, 10)];
+  eq('a lift that is still climbing is left alone', P.overloadSuggestions(climbing).length, 0);
+
+  /* An older plateau at the same weight must not resurrect itself after a
+     heavier session breaks the run. Newest first: 135, 145, 135, 135, 135. */
+  const broken = [
+    sess('2026-09-05', 135, 10), sess('2026-08-29', 145, 8),
+    sess('2026-08-22', 135, 10), sess('2026-08-15', 135, 10), sess('2026-08-08', 135, 10),
+  ];
+  eq('a broken run does not count the older stretch', P.overloadSuggestions(broken).length, 0);
+
+  /* The top set is the heaviest one, not the first or the last. */
+  const mixed = [
+    { date: '2026-08-15', entries: [{ exerciseId: 'bench_press', sets: [{ weight: 95, reps: 12 }, { weight: 135, reps: 10 }] }] },
+    { date: '2026-08-08', entries: [{ exerciseId: 'bench_press', sets: [{ weight: 135, reps: 10 }, { weight: 95, reps: 12 }] }] },
+    { date: '2026-08-01', entries: [{ exerciseId: 'bench_press', sets: [{ weight: 135, reps: 10 }] }] },
+  ];
+  eq('warm-up sets do not break the run', P.overloadSuggestions(mixed).length, 1);
+
+  /* Sets with no reps were never performed. */
+  const empty = [{ date: '2026-08-15', entries: [{ exerciseId: 'bench_press', sets: [{ weight: 135, reps: 0 }] }] }];
+  eq('an unperformed set contributes nothing', P.overloadSuggestions(empty).length, 0);
+  eq('no history means no advice', P.overloadSuggestions([]).length, 0);
+}
+
+/* ============================== custom machines ============================== */
+
+{
+  section('custom machines');
+
+  eq('a name plate becomes a safe id',
+    X.customId('HOIST ROC-IT Seated Mid Row RS-2203'),
+    'custom_hoist_roc_it_seated_mid_row_rs_2203');
+  check('custom ids are namespaced', X.isCustom(X.customId('Anything')));
+  check('built-in ids are not', !X.isCustom('bench_press'));
+  eq('an unnameable machine still gets an id', X.customId('!!!'), 'custom_machine');
+
+  const before = X.EXERCISES.length;
+  const added = X.registerCustom([{
+    id: 'custom_test_row', name: 'Test Row', pattern: 'horizontal_pull',
+    type: 'compound', primary: ['lats'], secondary: ['biceps', 'not_a_muscle'],
+    equipment: ['row_machine', 'not_a_thing'],
+  }]);
+  eq('one machine registers', added, 1);
+  eq('and joins the library', X.EXERCISES.length, before + 1);
+  check('and is reachable by id', !!X.BY_ID.custom_test_row);
+  eq('invented muscles are dropped', X.BY_ID.custom_test_row.secondary.length, 1);
+  eq('invented equipment is dropped', X.BY_ID.custom_test_row.equipment.length, 1);
+  eq('registering twice is a no-op', X.registerCustom([{ id: 'custom_test_row', name: 'Test Row' }]), 0);
+
+  /* The whole point of merging into the real library: everything downstream
+     has to see it. A machine that logs but never appears in a chart is worse
+     than no machine at all, because it looks like it worked. */
+  const withEquip = X.availableExercises(['row_machine']);
+  check('a custom machine shows up in the picker',
+    withEquip.some((e) => e.id === 'custom_test_row'));
+  const vol = T.volumeByGroup([{ date: '2026-08-20', entries: [{ exerciseId: 'custom_test_row', sets: [{ weight: 100, reps: 10 }] }] }]);
+  check('and counts towards volume', (vol.back || 0) > 0);
+
+  /* A machine with no muscle attached would be invisible to every chart. */
+  X.registerCustom([{ id: 'custom_bare', name: 'Bare', pattern: 'isolation', primary: [] }]);
+  check('a machine with no muscles still gets one', X.BY_ID.custom_bare.primary.length === 1);
+
+  eq('an entry with no name is refused', X.registerCustom([{ id: 'custom_nameless' }]), 0);
+}
+
+/* ============================== classes and cardio ============================== */
+
+{
+  section('classes and cardio');
+
+  check('Solidcore is loggable', !!X.CLASS_BY_ID.solidcore);
+  check('reformer pilates is loggable', !!X.CLASS_BY_ID.reformer_pilates);
+  eq('every class id is unique',
+    new Set(X.CLASS_TYPES.map((c) => c.id)).size, X.CLASS_TYPES.length);
+
+  check('a treadmill run measures distance', X.tracksDistance('treadmill_run'));
+  check('a stair climber does not', !X.tracksDistance('stairmaster_c'));
+  check('every distance mode is a real exercise',
+    [...X.DISTANCE_MODES].every((id) => !!X.BY_ID[id]));
+  check('every cardio mode is typed as cardio',
+    X.CARDIO_MODES().every((e) => e.type === 'cardio'));
+  check('core work is offered with no equipment at all',
+    X.CORE_EXERCISES([]).length > 0);
+  check('every core exercise really trains the core',
+    X.CORE_EXERCISES().every((e) => e.pattern === 'core'));
+}
+
 /* ============================== report ============================== */
 
 export function runAll() {

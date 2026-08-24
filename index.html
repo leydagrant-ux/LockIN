@@ -51,14 +51,18 @@ a { color:var(--accent); }
   position:fixed; left:0; right:0; bottom:0; z-index:40;
   height:calc(var(--tab-h) + var(--safe-b));
   padding-bottom:var(--safe-b);
-  display:grid; grid-template-columns:repeat(5,1fr);
+  display:grid; grid-template-columns:repeat(6,1fr);
   background:rgba(15,19,25,.93); backdrop-filter:blur(12px);
   border-top:1px solid var(--line);
 }
 .tabs button {
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
   color:var(--faint); font-size:10px; letter-spacing:.02em;
+  /* Six tabs on a 375px screen is 62px each. Without this the longest label
+     wraps and shoves the icons out of line with their neighbours. */
+  min-width:0; padding:0 2px;
 }
+.tabs button span { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tabs button[aria-current="page"] { color:var(--accent); }
 .tabs svg { width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:1.8;
             stroke-linecap:round; stroke-linejoin:round; }

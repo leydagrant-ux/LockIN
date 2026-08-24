@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **221 / 221 passing**
+- `http://localhost:8777/selftest.html` — **261 / 261 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,10 +57,50 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 221 regression checks | Passing |
+| `selftest.js/.html` | 261 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
+
+---
+
+## Round two — the gym notes (2026-08-24)
+
+Ten changes Grant wrote down during a session, all built and all driven in a
+real browser against `?demo`:
+
+| Asked for | Where it lives | Proven by |
+|---|---|---|
+| Leave a workout and come back to it | `stash`/`unstash` in `ui.js`, `pausedCard`, the floating resume bar | Typed 185x8, left the tab, reloaded the page: session and typed values both came back |
+| Edit the plan after finalising it | `planEditSheet`, `saveDays` | Renamed a day, changed sets 3 to 5, removed one exercise, added another, saved: all five weeks rebuilt around the edit |
+| A logged workout becomes that day's new standard | `syncDayFromSession` | Dropped three exercises and swapped a deadlift for a cable fly mid-session; the day template afterwards read exactly what was done |
+| Coach grades the session 1-100 against the goal | `AI.gradeWorkout`, `gradeBlock` | Stubbed Worker: correct schema, exercise NAMES not ids in the prompt, and a model returning 118 was clamped to 100 |
+| Photograph a machine to add it | `/vision` `subject`, `AI.identifyMachine`, `EX.registerCustom` | Stubbed the whole two-stage call with the real Hoist plate text: name suggested, edited, saved, and the machine then appeared in the picker, the equipment list and the volume charts |
+| Notes suggesting weight increases | `PROG.overloadSuggestions`, `overloadCard` | 16 selftest cases, including the three ways a naive version gets it wrong |
+| Cardio tab with a live timer | `cardioView`, the `S.timer` object | Started, faked 90 seconds, paused: clock read 1:30; the stair climber offered no distance field, the treadmill did |
+| Ashtin's pilates and Solidcore classes | `EX.CLASS_TYPES`, `classSheet` | Logged a 50-minute Solidcore with a studio name |
+| Look back at a logged session | `reviewSheet`, `reviewBody` | Opened from the recent list with sets, tonnage, e1RM per set and the grade |
+| Log abs | `quick-core`, filtered picker | Opens the ordinary logger filtered to core movements |
+
+**Abs are logged as a workout, not as cardio minutes.** Logged as cardio they
+would earn cardio points and contribute nothing to the body map, which is
+exactly backwards. The button lives in the Cardio tab because that is where
+Grant asked for it.
+
+### Needs a Worker redeploy
+
+`worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,
+a photographed machine comes back described as food:
+
+```bash
+cd worker && npx wrangler deploy
+```
+
+### Still unverified
+
+- The machine scan and the grader have only ever run against a stubbed Worker.
+  The contracts are right; the live models have not been asked.
+- `safe-area-inset-top` still needs a real notched iPhone.
 
 ---
 
@@ -131,8 +171,17 @@ silently in the first cut:
     --window-size=820,860 --virtual-time-budget=2500 http://localhost:8777/...
   ```
   Then read the PNG. This is the only way to actually see the body diagrams.
-- **Long heredocs via Bash hit a command-length limit** (`ENAMETOOLONG`). Use the
-  Write tool for anything large.
+- **Long heredocs via Bash hit a command-length limit** (`ENAMETOOLONG`), and
+  worse, they EAT BACKSLASHES. `.join('\n')` arrived as a real newline inside a
+  string literal, which is an unterminated string. It has now happened twice.
+  Use the Write tool for anything large, and for anything containing a
+  backslash, always.
+- **`node --check` is not a syntax check here.** It parses as a script, and it
+  happily passed the exact file the browser refused to load. Import it as a
+  module instead; see the Tests section of the README.
+- **Python patch scripts write CRLF on Windows.** That leaves the tree mixed and
+  makes the next exact-match patch fail against its own output. Normalise to LF
+  after any scripted edit.
 - **`sw.js` `VERSION` must be bumped on every deploy**, and `SHELL` must list
   every module `index.html` imports, or the deployed app is blank rather than
   degraded.

@@ -192,11 +192,22 @@ const VISION_ATTEMPTS = [
   { model: '@cf/llava-hf/llava-1.5-7b-hf', style: 'bytes' },
 ];
 
-const VISION_PROMPT =
-  'List the foods on this plate and estimate the portion of each. Be concrete: ' +
-  'name each item and give a rough amount, like "about 6 oz grilled chicken, ' +
-  '1 cup white rice, half an avocado". Do not give calories. Do not add ' +
-  'commentary. If it is not food, say so in one short sentence.';
+const VISION_PROMPTS = {
+  meal:
+    'List the foods on this plate and estimate the portion of each. Be concrete: ' +
+    'name each item and give a rough amount, like "about 6 oz grilled chicken, ' +
+    '1 cup white rice, half an avocado". Do not give calories. Do not add ' +
+    'commentary. If it is not food, say so in one short sentence.',
+
+  /* Gym machines are usually photographed for their NAME PLATE, so reading the
+     text on the machine matters as much as recognising the shape of it. */
+  equipment:
+    'This is a photo taken in a gym. Say what piece of equipment it is. If there ' +
+    'is a name or label printed on the machine, read it out exactly. Then name ' +
+    'the movement it is used for in plain gym language, for example "seated leg ' +
+    'curl machine", "cable crossover", "hack squat sled". Two sentences at most. ' +
+    'If it is not gym equipment, say so in one short sentence.',
+};
 
 function dataUrlToBytes(dataUrl) {
   const comma = dataUrl.indexOf(',');
@@ -220,6 +231,10 @@ async function handleVision(body, env, cors) {
     return json({ error: 'image too large' }, 413, cors);
   }
 
+  /* Two subjects share this route because they share the hard part: reaching a
+     multimodal model at all. Only the prompt differs. */
+  const prompt = VISION_PROMPTS[body.subject] || VISION_PROMPTS.meal;
+
   const errors = [];
   for (const attempt of VISION_ATTEMPTS) {
     try {
@@ -228,13 +243,13 @@ async function handleVision(body, env, cors) {
           messages: [{
             role: 'user',
             content: [
-              { type: 'text', text: VISION_PROMPT },
+              { type: 'text', text: prompt },
               { type: 'image_url', image_url: { url: dataUrl } },
             ],
           }],
           max_tokens: 300,
         }
-        : { image: [...dataUrlToBytes(dataUrl)], prompt: VISION_PROMPT, max_tokens: 300 };
+        : { image: [...dataUrlToBytes(dataUrl)], prompt, max_tokens: 300 };
 
       const res = await env.AI.run(attempt.model, input);
       const text = (res?.response ?? res?.result?.response ?? res?.description ?? '').trim();

@@ -376,3 +376,98 @@ export function loadForReps(e1rm, reps) {
   if (!Number.isFinite(e1rm) || !Number.isFinite(reps) || reps < 1) return 0;
   return e1rm / (1 + reps / 30);
 }
+
+/* ============================== overload notes ============================== */
+
+const dayDiff = (from, to) => Math.round(
+  (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000,
+);
+
+/** The heaviest set of an entry. Reps break a tie, so 135x8 beats 135x5. */
+function topSet(sets) {
+  const real = (sets || []).filter((s) => Number(s.reps) > 0);
+  if (!real.length) return null;
+  return real.reduce((best, s) => {
+    const w = Number(s.weight) || 0, bw = Number(best.weight) || 0;
+    if (w > bw) return s;
+    if (w === bw && (Number(s.reps) || 0) > (Number(best.reps) || 0)) return s;
+    return best;
+  });
+}
+
+/**
+ * Lifts that have sat at the same load long enough to deserve a nudge.
+ *
+ * The bar is deliberately high, because the cost of a wrong suggestion is a
+ * missed rep or a tweaked shoulder. A lift only qualifies when the TOP SET has
+ * been at the same weight for `sessions` sessions running AND that streak
+ * spans at least `days` days. Anything still climbing week to week needs no
+ * advice and gets none.
+ *
+ * `ready` separates the two real cases. Hitting the top of the rep range at a
+ * stuck weight means add weight. Stuck below it means the reps come first —
+ * telling someone to add weight when they cannot finish the set they have is
+ * how people get hurt.
+ *
+ * @param {object[]} workouts  logged sessions, any order, each { date, entries[] }
+ * @returns {object[]} longest stall first
+ */
+export function overloadSuggestions(workouts, opts = {}) {
+  const minSessions = opts.sessions ?? 3;
+  const minDays = opts.days ?? 14;
+  const repTarget = opts.repTarget ?? 10;
+
+  const newestFirst = [...(workouts || [])]
+    .filter((w) => w && w.date)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+
+  const runs = new Map();
+
+  for (const w of newestFirst) {
+    for (const entry of w.entries || []) {
+      const top = topSet(entry.sets);
+      if (!top) continue;
+      const weight = Number(top.weight) || 0;
+      const reps = Number(top.reps) || 0;
+
+      const run = runs.get(entry.exerciseId);
+      if (!run) {
+        runs.set(entry.exerciseId, {
+          exerciseId: entry.exerciseId, weight, sessions: 1,
+          bestReps: reps, latest: w.date, oldest: w.date, closed: false,
+        });
+        continue;
+      }
+      /* A different load ends the streak. Only the unbroken stretch at the
+         CURRENT weight counts, or an old plateau would resurrect itself the
+         moment somebody deloaded back down to it. */
+      if (run.closed) continue;
+      if (weight !== run.weight) { run.closed = true; continue; }
+      run.sessions += 1;
+      run.bestReps = Math.max(run.bestReps, reps);
+      run.oldest = w.date;
+    }
+  }
+
+  const out = [];
+  for (const run of runs.values()) {
+    const days = dayDiff(run.oldest, run.latest);
+    if (run.sessions < minSessions || days < minDays) continue;
+
+    const ready = run.bestReps >= repTarget;
+    const step = incrementFor(run.exerciseId);
+    out.push({
+      exerciseId: run.exerciseId,
+      weight: run.weight,
+      bestReps: run.bestReps,
+      sessions: run.sessions,
+      days,
+      ready,
+      suggested: ready ? Math.round((run.weight + step) * 100) / 100 : run.weight,
+      step,
+      repTarget,
+    });
+  }
+
+  return out.sort((a, b) => b.days - a.days || b.sessions - a.sessions);
+}

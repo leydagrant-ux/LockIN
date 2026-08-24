@@ -383,9 +383,18 @@ support, no medical advice.`,
  * @param {string} dataUrl a compressed image/jpeg data URL
  * @returns {{description: string, model: string}}
  */
-export async function describeMealPhoto(dataUrl) {
+export const describeMealPhoto = (dataUrl) => describePhoto(dataUrl, 'meal');
+
+/**
+ * Send a photo to the Worker's vision route and get prose back.
+ *
+ * `subject` selects the prompt on the Worker side. Both subjects share this one
+ * function because they share the hard part — reaching a multimodal model at
+ * all — and differ only in what the model is asked to look for.
+ */
+export async function describePhoto(dataUrl, subject = 'meal') {
   if (!config.visionUrl) {
-    throw new AIError('Photo logging is not set up yet.', 'unconfigured');
+    throw new AIError('Photo reading is not set up yet.', 'unconfigured');
   }
 
   let res;
@@ -396,7 +405,7 @@ export async function describeMealPhoto(dataUrl) {
         'content-type': 'application/json',
         authorization: `Bearer ${await config.getToken()}`,
       },
-      body: JSON.stringify({ image: dataUrl }),
+      body: JSON.stringify({ image: dataUrl, subject }),
     });
   } catch {
     throw new AIError('Could not reach the coach. Check your connection.', 'network');
@@ -545,4 +554,185 @@ export async function chooseSwap({ original, candidates, reason }) {
       content: `Replacing: ${original.name} (${original.primary.join(', ')})\nWhy: ${reason}\n\nOptions:\n${list}`,
     },
   ], SWAP_SCHEMA, { maxTokens: 400 });
+}
+
+/* ============================== session grading ============================== */
+
+const GRADE_SCHEMA = {
+  name: 'session_grade',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['score', 'headline', 'aligned', 'strengths', 'fixes', 'longTerm'],
+    properties: {
+      score: { type: 'integer', description: 'Quality of this session out of 100' },
+      headline: { type: 'string', description: 'One short sentence, no preamble' },
+      aligned: {
+        type: 'string', enum: ['yes', 'partly', 'no'],
+        description: 'Whether the session serves the stated goal',
+      },
+      strengths: {
+        type: 'array', description: 'At most three. Specific, not flattery.',
+        items: { type: 'string' },
+      },
+      fixes: {
+        type: 'array', description: 'At most three concrete changes for next time.',
+        items: { type: 'string' },
+      },
+      longTerm: {
+        type: 'string',
+        description: 'One sentence: does repeating this weekly move the goal?',
+      },
+    },
+  },
+};
+
+/**
+ * Grade one logged session out of 100 against the person's goal.
+ *
+ * The caller formats the session as text rather than passing raw documents,
+ * because exercise ids mean nothing to a model and names mean everything.
+ *
+ * The score is clamped here rather than trusted. `minimum`/`maximum` are not
+ * enforced by strict schema mode, only described, so a model that returns 105
+ * would otherwise render as a 105/100.
+ */
+export async function gradeWorkout({ text, goalLabel, profile = {}, history = '' }) {
+  const result = await ask([
+    {
+      role: 'system',
+      content: [
+        'You are an experienced strength coach reviewing one training session.',
+        'Grade it out of 100 on how well it serves the stated goal: exercise',
+        'selection, volume, balance across muscle groups, and whether the load',
+        'and reps show progression.',
+        'Be honest and specific. A merely adequate session is a 70, not a 90.',
+        'Reserve above 90 for a session you would not change.',
+        'Judge only what is in front of you. Do not invent missing detail, and',
+        'do not give medical advice.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: [
+        `Goal: ${goalLabel || 'general fitness'}`,
+        profile.sex || profile.age ? `Lifter: ${profile.sex || ''} ${profile.age ? `${profile.age}y` : ''}`.trim() : '',
+        profile.daysPerWeek ? `Trains ${profile.daysPerWeek} days a week` : '',
+        history ? `Recent weeks:\n${history}` : '',
+        '',
+        'Session just logged:',
+        text,
+      ].filter(Boolean).join('\n'),
+    },
+  ], GRADE_SCHEMA, { maxTokens: 700, temperature: 0.2 });
+
+  const raw = Number(result.score);
+  return {
+    ...result,
+    score: Number.isFinite(raw) ? Math.max(1, Math.min(100, Math.round(raw))) : 50,
+    strengths: (result.strengths || []).slice(0, 3),
+    fixes: (result.fixes || []).slice(0, 3),
+  };
+}
+
+/* ============================== equipment photo ============================== */
+
+const MACHINE_SCHEMA = {
+  name: 'machine_match',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'plateText', 'equipmentIds', 'pattern', 'primary', 'secondary', 'confidence', 'note'],
+    properties: {
+      name: {
+        type: 'string',
+        description: 'What to call this exercise. Prefer the name printed on the machine.',
+      },
+      plateText: {
+        type: 'string',
+        description: 'Text actually read off the machine. Empty if none was legible.',
+      },
+      equipmentIds: {
+        type: 'array',
+        description: 'Ids from the supplied list only. Empty if nothing fits.',
+        items: { type: 'string' },
+      },
+      pattern: {
+        type: 'string',
+        enum: ['squat', 'hinge', 'lunge', 'horizontal_push', 'vertical_push',
+          'horizontal_pull', 'vertical_pull', 'carry', 'isolation', 'core', 'cardio'],
+      },
+      primary: {
+        type: 'array', description: 'Muscle ids this trains directly, from the supplied list.',
+        items: { type: 'string' },
+      },
+      secondary: {
+        type: 'array', description: 'Muscle ids it also works, from the supplied list.',
+        items: { type: 'string' },
+      },
+      confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+      note: { type: 'string', description: 'One short sentence. Empty if there is nothing to say.' },
+    },
+  },
+};
+
+/**
+ * Read a photo of a gym machine into something the app can actually train with.
+ *
+ * Two stages, for the same reason the meal photo has two: the free vision model
+ * can read a name plate but knows nothing about this app's id lists, and the
+ * text model knows the id lists but cannot see. So vision describes, text maps.
+ *
+ * Every id that comes back is filtered against the real catalogues rather than
+ * trusted. A hallucinated equipment id would silently unlock exercises the
+ * person cannot do, and a hallucinated muscle id would land in the body heat
+ * map as a muscle that does not exist.
+ *
+ * The name is a SUGGESTION. It is shown in an editable field before anything is
+ * saved, because a plate that reads "RS-2203" is a part number, not a name, and
+ * only the person standing in front of the machine can tell.
+ */
+export async function identifyMachine(dataUrl, { equipment, muscles }) {
+  const seen = await describePhoto(dataUrl, 'equipment');
+
+  const validEquip = new Set(equipment.map((c) => c.id));
+  const validMuscle = new Set(muscles.map((m) => m.id));
+
+  const result = await ask([
+    {
+      role: 'system',
+      content: [
+        'You turn a described gym machine into a catalogue entry.',
+        'Name it after the text printed on the machine when there is any.',
+        'If nothing is legible, name it for the movement in plain gym language,',
+        'like "Seated Cable Row" or "Hack Squat".',
+        'Only ever return ids that appear in the supplied lists. If no equipment',
+        'id fits, return an empty array and say so in the note.',
+        'A machine that is a variant of a listed item still counts: a seated leg',
+        'curl is the leg_curl machine.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: [
+        'Equipment ids:',
+        equipment.map((c) => `${c.id} = ${c.label}`).join('\n'),
+        '',
+        'Muscle ids:',
+        muscles.map((m) => `${m.id} = ${m.label}`).join('\n'),
+        '',
+        'The photo was described as:',
+        seen.description,
+      ].join('\n'),
+    },
+  ], MACHINE_SCHEMA, { maxTokens: 500, temperature: 0.1 });
+
+  return {
+    ...result,
+    name: String(result.name || '').slice(0, 60).trim() || 'New machine',
+    equipmentIds: [...new Set((result.equipmentIds || []).filter((id) => validEquip.has(id)))],
+    primary: [...new Set((result.primary || []).filter((m) => validMuscle.has(m)))],
+    secondary: [...new Set((result.secondary || []).filter((m) => validMuscle.has(m)))],
+    description: seen.description,
+  };
 }

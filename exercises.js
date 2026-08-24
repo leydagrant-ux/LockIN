@@ -398,3 +398,95 @@ export function findSwaps(exerciseId, equipment, opts = {}) {
     .sort((a, b) => b.score - a.score)
     .map((s) => s.exercise);
 }
+
+/* ============================== studio classes ============================== */
+
+/* A class is logged by duration, not by sets and reps: there is no load to
+   progress and the instructor picks the work. These are not in EXERCISES
+   because nothing in the program builder can ever prescribe one — you book a
+   class, you do not program it. */
+export const CLASS_TYPES = [
+  { id: 'solidcore', label: 'Solidcore', groups: ['core', 'legs'] },
+  { id: 'reformer_pilates', label: 'Reformer Pilates', groups: ['core', 'legs'] },
+  { id: 'mat_pilates', label: 'Mat Pilates', groups: ['core'] },
+  { id: 'barre', label: 'Barre', groups: ['legs', 'core'] },
+  { id: 'sculpt', label: 'Sculpt / Tone', groups: ['legs', 'core', 'arms'] },
+  { id: 'yoga', label: 'Yoga', groups: ['core'] },
+  { id: 'hot_yoga', label: 'Hot Yoga', groups: ['core'] },
+  { id: 'spin', label: 'Spin', groups: ['legs'] },
+  { id: 'hiit_class', label: 'HIIT class', groups: ['legs', 'core'] },
+  { id: 'other_class', label: 'Other class', groups: [] },
+];
+
+export const CLASS_BY_ID = Object.fromEntries(CLASS_TYPES.map((c) => [c.id, c]));
+
+/* ============================== cardio helpers ============================== */
+
+/* Distance means something on a treadmill and nothing on a stair climber.
+   Asking for miles anyway gets a number somebody invented, so the field is
+   simply not offered for the machines that do not measure it. */
+export const DISTANCE_MODES = new Set([
+  'run_outdoor', 'walk', 'treadmill_run', 'incline_walk',
+  'cycling', 'outdoor_bike', 'rowing', 'elliptical_c', 'swim', 'hike',
+]);
+
+export const tracksDistance = (exerciseId) => DISTANCE_MODES.has(exerciseId);
+
+/** Every cardio machine and modality, regardless of what equipment is owned.
+    Outdoor running does not need a treadmill checked off to be loggable. */
+export const CARDIO_MODES = () => EXERCISES.filter((e) => e.type === 'cardio');
+
+/** Core work, for the abs section. Bodyweight planks need no equipment, so this
+    is unfiltered by default and narrowed by the caller when it matters. */
+export const CORE_EXERCISES = (equipment) => (equipment
+  ? availableExercises(equipment, { pattern: 'core' })
+  : EXERCISES.filter((e) => e.pattern === 'core'));
+
+/* ============================== custom machines ============================== */
+
+/*
+ * Exercises added by photographing a machine.
+ *
+ * These are merged into the SAME arrays the built-in library uses rather than
+ * kept in a parallel list, because every consumer — the logger, swaps, volume
+ * by muscle group, the body heat map — reads BY_ID. A separate list would mean
+ * a machine you added showed up when logging and then silently contributed
+ * nothing to any chart.
+ *
+ * Ids are prefixed so a custom entry can never collide with a built-in one, and
+ * re-registering is a no-op, since this runs on every profile load.
+ */
+export const CUSTOM_PREFIX = 'custom_';
+
+export const isCustom = (id) => String(id).startsWith(CUSTOM_PREFIX);
+
+export function customId(name) {
+  const slug = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  return `${CUSTOM_PREFIX}${slug || 'machine'}`;
+}
+
+export function registerCustom(list = []) {
+  let added = 0;
+  for (const raw of list) {
+    if (!raw?.id || !raw?.name || BY_ID[raw.id]) continue;
+    const e = {
+      id: raw.id,
+      name: raw.name,
+      pattern: PATTERNS.includes(raw.pattern) ? raw.pattern : 'isolation',
+      type: raw.type === 'compound' ? 'compound' : 'isolation',
+      primary: (raw.primary || []).filter((m) => MUSCLES.includes(m)),
+      secondary: (raw.secondary || []).filter((m) => MUSCLES.includes(m)),
+      equipment: (raw.equipment || []).filter((q) => EQUIPMENT_LABELS[q]),
+      unilateral: !!raw.unilateral,
+      bw: false,
+      custom: true,
+    };
+    /* A machine with no muscle attached is invisible to every chart and a bad
+       swap candidate, so it gets a default rather than being stored broken. */
+    if (!e.primary.length) e.primary = ['chest'];
+    EXERCISES.push(e);
+    BY_ID[e.id] = e;
+    added += 1;
+  }
+  return added;
+}
