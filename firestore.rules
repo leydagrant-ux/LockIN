@@ -19,13 +19,13 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    /* Replace both with the real uids. Settings in the app shows you your own
-       once you are signed in. Until they are filled in, NOBODY has access —
-       deliberately failing closed rather than open. */
+    /* The only two accounts with any access at all. Verified against the
+       Firebase Auth users list rather than transcribed from a screenshot —
+       a misread I-versus-l here locks someone out with a confusing error. */
     function members() {
       return [
         'ktqSNUWrW4ZF5cH7wzOED362Saf1',
-        'REPLACE_WITH_ASHTIN_UID'
+        'v1Foijd9ZagOEhIu8TFQIHhq0513'
       ];
     }
 
