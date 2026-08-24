@@ -25,6 +25,16 @@ So everything except barcode lookup goes through a Cloudflare Worker (free tier:
 100,000 requests/day, this app uses maybe 20). The Worker also keeps the Groq and
 USDA keys server-side, where the browser can never see them.
 
+**Groq has no vision model.** Every one was retired during 2026 (Maverick in
+March, Scout in July) in favour of the text-only `gpt-oss` family. The meal photo
+therefore runs on **Cloudflare Workers AI**, which is on the same account as the
+Worker: no extra key, no extra CORS. Free tier is 10,000 neurons/day.
+
+Because those open vision models name food well but judge portions badly, the
+photo is a TWO-STAGE flow: the vision model describes the plate, the user
+corrects the description, and only then does `gpt-oss-120b` turn that text into
+macros under the strict schema. Each model does the part it is good at.
+
 Two other things that were verified the hard way and are easy to regress:
 
 - **USDA returns 404 to any request with no `User-Agent`.** Cloudflare Workers

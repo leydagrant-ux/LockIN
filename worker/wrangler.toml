@@ -19,3 +19,9 @@ ALLOWED_UIDS = "ktqSNUWrW4ZF5cH7wzOED362Saf1,v1Foijd9ZagOEhIu8TFQIHhq0513"
 # Secrets are NOT set here. Run these once each:
 #   npx wrangler secret put GROQ_API_KEY
 #   npx wrangler secret put USDA_API_KEY
+
+# Workers AI, for the meal-photo vision step. Free tier is 10,000 neurons/day
+# shared across models. Groq has no vision model any more (every one was retired
+# during 2026), so the photo step runs on Cloudflare instead.
+[ai]
+binding = "AI"

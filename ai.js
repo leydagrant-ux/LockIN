@@ -16,13 +16,14 @@
  */
 
 export const MODEL = 'openai/gpt-oss-120b';
+export const VISION_ROUTE = 'vision';
 export const FALLBACK_MODEL = 'openai/gpt-oss-20b';
 
-let config = { workerUrl: '', getToken: async () => '' };
+let config = { workerUrl: '', visionUrl: '', getToken: async () => '' };
 
-/** Wire up the Worker endpoint and a Firebase ID-token getter. */
-export function configure({ workerUrl, getToken }) {
-  config = { workerUrl, getToken };
+/** Wire up the Worker endpoints and a Firebase ID-token getter. */
+export function configure({ workerUrl, visionUrl, getToken }) {
+  config = { workerUrl, visionUrl: visionUrl || '', getToken };
 }
 
 export const isConfigured = () => Boolean(config.workerUrl);
@@ -363,6 +364,153 @@ support, no medical advice.`,
     },
     { role: 'user', content: JSON.stringify(summary) },
   ], REVIEW_SCHEMA, { maxTokens: 1000, temperature: 0.5 });
+}
+
+
+
+/* ============================== meal photo ============================== */
+
+/**
+ * Describe what is on a plate.
+ *
+ * Runs on Workers AI rather than Groq, because Groq retired every vision model
+ * during 2026. The result is deliberately just a DESCRIPTION, not macros: small
+ * open vision models identify food well but estimate portions badly, and
+ * portion is most of the calories. The user corrects the description, and then
+ * logMeal() turns that corrected text into numbers with the strict schema.
+ * Each model does the part it is actually good at.
+ *
+ * @param {string} dataUrl a compressed image/jpeg data URL
+ * @returns {{description: string, model: string}}
+ */
+export async function describeMealPhoto(dataUrl) {
+  if (!config.visionUrl) {
+    throw new AIError('Photo logging is not set up yet.', 'unconfigured');
+  }
+
+  let res;
+  try {
+    res = await fetch(config.visionUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${await config.getToken()}`,
+      },
+      body: JSON.stringify({ image: dataUrl }),
+    });
+  } catch {
+    throw new AIError('Could not reach the coach. Check your connection.', 'network');
+  }
+
+  if (res.status === 413) throw new AIError('That photo is too big. Try again.', 'size');
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new AIError(detail.error || `The photo could not be read (${res.status}).`, 'upstream');
+  }
+
+  const data = await res.json();
+  if (!data.description) throw new AIError('Nothing recognisable in that photo.', 'empty');
+  return data;
+}
+
+/* ============================== program planning ============================== */
+
+const PLAN_SCHEMA = {
+  name: 'program_plan',
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['status', 'question', 'summary', 'days', 'learned'],
+    properties: {
+      status: { type: 'string', enum: ['proposal', 'question'] },
+      question: { type: 'string', description: 'Empty unless status is question' },
+      summary: { type: 'string', description: 'One short paragraph describing the week' },
+      learned: {
+        type: 'array',
+        description: 'Durable preferences worth remembering next time. Empty if nothing new.',
+        items: { type: 'string' },
+      },
+      days: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['name', 'focus', 'blocks'],
+          properties: {
+            name: { type: 'string', description: 'e.g. "Monday - Pull"' },
+            focus: { type: 'string' },
+            blocks: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['exerciseId', 'sets', 'repMin', 'repMax', 'restSec'],
+                properties: {
+                  exerciseId: { type: 'string', description: 'MUST be an id from the supplied list' },
+                  sets: { type: 'integer' },
+                  repMin: { type: 'integer' },
+                  repMax: { type: 'integer' },
+                  restSec: { type: 'integer' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+const PLAN_SYSTEM = `You are a strength coach building a weekly training plan through conversation.
+
+Honour the person's stated split exactly. If they say Monday pull, Tuesday push,
+that is the split; do not substitute a textbook one. If they want the same
+muscles every day, vary the VOLUME per muscle across days so each group gets a
+lighter day to recover rather than dropping it entirely.
+
+Choose exercises ONLY from the supplied list, by exact id. Never invent an id.
+Order compounds before isolation. Respect stated injuries absolutely.
+
+Ask a question ONLY when something would materially change the plan and you
+cannot reasonably assume it. Otherwise produce the plan and let them react to
+something concrete. Never ask more than one question at a time.
+
+Put anything durable you learn about how they like to train into "learned" as
+short standalone sentences. Write preferences, not one-off details: "prefers
+dumbbells over barbell for pressing" is durable; "wants 4 sets today" is not.
+
+Do not prescribe weights and do not mention weeks or progression. The app
+handles load and periodisation itself.`;
+
+/**
+ * One turn of the program conversation.
+ *
+ * Returns either a question or a full week of day templates. `program.js` then
+ * expands whatever comes back across a mesocycle, so the model never has to
+ * think about weeks, load, or deloads.
+ *
+ * The candidate list is pre-filtered to the user's equipment, so a returned id
+ * is always something they can actually perform. Callers should still drop any
+ * unrecognised id, since strict schema guarantees a string, not a valid one.
+ */
+export async function planProgram({ turns, profile, prefs, candidates }) {
+  const list = candidates
+    .map((e) => `${e.id}|${e.name}|${e.primary.join(',')}`)
+    .join('\n');
+
+  const context = [
+    `Goal: ${profile.goal}. Experience: ${profile.experience || 'intermediate'}.`,
+    `Days per week available: ${profile.daysPerWeek}. Session length: about ${profile.minutes || 60} minutes.`,
+    profile.limitations ? `Injuries or limitations: ${profile.limitations}` : '',
+    prefs?.length ? `Known preferences:\n${prefs.map((x) => `- ${x}`).join('\n')}` : '',
+    `\nAvailable exercises (id|name|primary muscles):\n${list}`,
+  ].filter(Boolean).join('\n');
+
+  return ask([
+    { role: 'system', content: PLAN_SYSTEM },
+    { role: 'system', content: context },
+    ...turns,
+  ], PLAN_SCHEMA, { maxTokens: 3000, temperature: 0.4 });
 }
 
 /* ============================== exercise swap ============================== */

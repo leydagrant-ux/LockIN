@@ -2,8 +2,9 @@
  *
  * Two routes, both doing the same three jobs for different upstreams:
  *
- *   POST /ai    -> Groq chat completions
- *   POST /food  -> USDA FoodData Central and Open Food Facts text search
+ *   POST /ai     -> Groq chat completions
+ *   POST /food   -> USDA FoodData Central and Open Food Facts text search
+ *   POST /vision -> Workers AI, describes a meal photo
  *
  * Why this exists at all is CORS, not cost. Browsers refuse to call
  * api.groq.com, and they refuse Open Food Facts' search endpoint and USDA's
@@ -170,6 +171,83 @@ async function handleFood(body, env, cors) {
   }, 200, cors);
 }
 
+
+/* ============================== vision ============================== */
+
+/* Groq retired every vision model during 2026 (Maverick in March, Scout in
+   July), so the meal photo runs on Workers AI instead. It is on the same
+   account as this Worker, which means no extra key and no CORS at all.
+ *
+ * Two calling conventions exist and the docs do not say which applies to which
+ * model, so both are tried in order:
+ *   1. "Text Generation" multimodal models take OpenAI-style messages with an
+ *      image_url data URI.
+ *   2. "Image-to-Text" models take raw bytes plus a prompt.
+ * Whichever answers first wins. The model that worked is returned so the app
+ * can show it and so this can be simplified once it is known.
+ */
+const VISION_ATTEMPTS = [
+  { model: '@cf/meta/llama-3.2-11b-vision-instruct', style: 'messages' },
+  { model: '@cf/mistralai/mistral-small-3.1-24b-instruct', style: 'messages' },
+  { model: '@cf/llava-hf/llava-1.5-7b-hf', style: 'bytes' },
+];
+
+const VISION_PROMPT =
+  'List the foods on this plate and estimate the portion of each. Be concrete: ' +
+  'name each item and give a rough amount, like "about 6 oz grilled chicken, ' +
+  '1 cup white rice, half an avocado". Do not give calories. Do not add ' +
+  'commentary. If it is not food, say so in one short sentence.';
+
+function dataUrlToBytes(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function handleVision(body, env, cors) {
+  if (!env.AI) return json({ error: 'Workers AI is not bound to this Worker' }, 500, cors);
+
+  const dataUrl = String(body.image || '');
+  if (!dataUrl.startsWith('data:image/')) {
+    return json({ error: 'image must be a data: URL' }, 400, cors);
+  }
+  /* Roughly 1.5 MB of base64. The app compresses well below this; the cap is
+     here so a stray upload cannot burn the daily neuron allowance. */
+  if (dataUrl.length > 1_500_000) {
+    return json({ error: 'image too large' }, 413, cors);
+  }
+
+  const errors = [];
+  for (const attempt of VISION_ATTEMPTS) {
+    try {
+      const input = attempt.style === 'messages'
+        ? {
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: VISION_PROMPT },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          }],
+          max_tokens: 300,
+        }
+        : { image: [...dataUrlToBytes(dataUrl)], prompt: VISION_PROMPT, max_tokens: 300 };
+
+      const res = await env.AI.run(attempt.model, input);
+      const text = (res?.response ?? res?.result?.response ?? res?.description ?? '').trim();
+      if (text) return json({ description: text, model: attempt.model }, 200, cors);
+      errors.push(`${attempt.model}: empty response`);
+    } catch (err) {
+      errors.push(`${attempt.model}: ${String(err?.message || err).slice(0, 120)}`);
+    }
+  }
+
+  return json({ error: 'No vision model could read that photo.', tried: errors }, 502, cors);
+}
+
 /* ============================== handler ============================== */
 
 export default {
@@ -208,6 +286,7 @@ export default {
 
     const path = new URL(request.url).pathname.replace(/\/+$/, '');
     if (path === '/food') return handleFood(body, env, cors);
+    if (path === '/vision') return handleVision(body, env, cors);
     return handleAI(body, env, cors);   /* '' and '/ai' both mean the AI route */
   },
 };

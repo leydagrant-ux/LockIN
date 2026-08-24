@@ -754,7 +754,8 @@ function foodView() {
 
     <div class="btn-row" style="margin-bottom:12px">
       <button class="btn primary" data-act="add-food">Add food</button>
-      <button class="btn" data-act="describe-food">Describe a meal</button>
+      <button class="btn" data-act="describe-food">Describe</button>
+      ${WORKER_URL ? '<button class="btn" data-act="photo-meal">Photo</button>' : ''}
     </div>
 
     <div class="card">
@@ -1017,26 +1018,85 @@ function buildTemplate(profile) {
   return { id: 'current', name: split.name, goal: profile.goal, days: out, startDate: todayKey() };
 }
 
-function programSheet() {
+/* The planning conversation. Kept at module scope so the sheet can be re-rendered
+   without losing the thread. */
+const planChat = { turns: [], proposal: null, busy: false };
+
+/**
+ * Candidates handed to the planner.
+ *
+ * Filtered to the user's equipment first, so a returned id is always something
+ * they own. Capped and biased toward compounds because the whole list would eat
+ * a large slice of the free tier's per-minute token budget on every turn.
+ */
+function planCandidates() {
   const equipment = activeEquipment();
-  const avail = EX.availableExercises(equipment).length;
-  const aiOn = Boolean(WORKER_URL);
-  openSheet('Build a program', `
-    <p class="muted tiny" style="margin-top:0">Built from the ${avail} exercises your
-    equipment allows, then expanded across a 5 week block with a deload at the end.
-    Load and daily adjustments are handled automatically as you log.</p>
-    <div class="field">
-      <label for="p-weeks">Block length</label>
-      <select id="p-weeks">
-        <option value="4">4 weeks</option>
-        <option value="5" selected>5 weeks (4 + deload)</option>
-        <option value="6">6 weeks</option>
-      </select>
+  const all = EX.availableExercises(equipment);
+  const compounds = all.filter((e) => e.type === 'compound');
+  const isolation = all.filter((e) => e.type === 'isolation');
+  return [...compounds, ...isolation].slice(0, 90);
+}
+
+const prefsList = () => S.profile?.coachPrefs || [];
+
+function programSheet() {
+  const prefs = prefsList();
+  const p = planChat.proposal;
+  const said = planChat.turns.filter((t) => t.role === 'user');
+
+  const body = `
+    ${!WORKER_URL ? `<div class="banner warn">The AI coach is not connected, so this
+      builds from a template instead. Tell me and I can switch it on.</div>` : ''}
+
+    ${prefs.length ? `<div class="card tight" style="margin-bottom:12px">
+      <div class="card-title row"><span>What it knows about you</span>
+        <button class="btn sm ghost" data-act="clear-prefs">Clear</button></div>
+      ${prefs.map((x, i) => `<div class="list-row" style="padding:6px 0">
+        <span class="grow tiny">${esc(x)}</span>
+        <button class="btn sm ghost" data-act="drop-pref" data-i="${i}">&times;</button>
+      </div>`).join('')}
+    </div>` : `<p class="tiny faint" style="margin-top:0">Tell it how you like to train.
+      For example: "Monday pull, Tuesday push, Wednesday legs, Thursday arms, Friday
+      back and chest" or "full body every day, rotate which muscles get the volume so
+      everything recovers".</p>`}
+
+    ${said.map((t) => `<div class="banner info" style="text-align:right">${esc(t.content)}</div>`).join('')}
+
+    ${p?.status === 'question' ? `<div class="banner warn">${esc(p.question)}</div>` : ''}
+
+    ${p?.status === 'proposal' ? `
+      <div class="banner ok">${esc(p.summary)}</div>
+      ${p.days.map((d) => `<div class="card tight" style="margin-bottom:8px">
+        <div class="card-title" style="margin-bottom:6px">${esc(d.name)}
+          <span class="faint" style="text-transform:none;letter-spacing:0"> · ${esc(d.focus)}</span></div>
+        ${d.blocks.map((b) => {
+          const ex = EX.BY_ID[b.exerciseId];
+          return ex ? `<div class="tiny" style="padding:2px 0">${esc(ex.name)}
+            <span class="faint">${b.sets} × ${b.repMin}-${b.repMax}</span></div>` : '';
+        }).join('')}
+      </div>`).join('')}
+      ${p.learned?.length ? `<p class="tiny faint">Will remember: ${p.learned.map(esc).join(' · ')}</p>` : ''}
+    ` : ''}
+
+    <div class="field" style="margin-top:12px">
+      <label for="pl-q">${planChat.turns.length ? 'What should change?' : 'How do you want to train?'}</label>
+      <textarea id="pl-q" placeholder="${planChat.turns.length
+        ? 'Swap the leg day to Thursday, and less calf work'
+        : 'Monday pull, Tuesday push, Wednesday legs, Thursday arms, Friday back and chest'}"></textarea>
     </div>
-    <div class="banner info">${esc(SPLITS[Math.min(6, Math.max(3, num(S.profile?.daysPerWeek, 4)))]?.name || 'Upper / lower')}
-      split, ${num(S.profile?.daysPerWeek, 4)} days a week.</div>
-    ${aiOn ? '' : '<p class="tiny faint">The AI coach would tailor exercise choice further, but it is not connected. The template below is fully usable.</p>'}
-  `, `<button class="btn primary wide" data-act="do-build-program">Build it</button>`);
+    <div id="pl-out"></div>`;
+
+  const foot = `
+    <div class="btn-row">
+      ${WORKER_URL
+        ? `<button class="btn ${p?.status === 'proposal' ? '' : 'primary'}" data-act="do-plan">
+             ${planChat.turns.length ? 'Revise' : 'Build it'}</button>`
+        : `<button class="btn primary" data-act="build-template">Use a template</button>`}
+      ${p?.status === 'proposal'
+        ? '<button class="btn primary" data-act="save-plan">Save this program</button>' : ''}
+    </div>`;
+
+  openSheet('Build a program', body, foot);
 }
 
 /* ============================== food flows ============================== */
@@ -1133,6 +1193,19 @@ function confirmMealSheet(result) {
       <p class="tiny faint">Confidence: ${esc(result.confidence || 'medium')}. Edit anything that looks off.</p>
       <button class="btn primary wide" type="submit">Log it</button>
     </form>`);
+}
+
+
+/** Save an expanded program, warn about obvious volume problems, and land on Today. */
+async function commitProgram(expanded, days) {
+  const check = PROG.validateVolume(days);
+  const program = { ...expanded, id: 'current', startDate: todayKey() };
+  await W.saveProgram(program);
+  S.program = program;
+  closeSheet();
+  toast(check.ok ? 'Program saved' : `Saved. ${check.issues[0].message}`, check.ok ? 'ok' : 'warn');
+  S.tab = 'today';
+  render();
 }
 
 /* ============================== actions ============================== */
@@ -1308,18 +1381,83 @@ const ACTIONS = {
     render();
   },
 
-  'do-build-program': () => guard(async () => {
-    const weeks = num($('#p-weeks')?.value, 5);
+  /* Template fallback, used when there is no Worker configured. */
+  'build-template': () => guard(async () => {
     const template = buildTemplate(S.profile);
-    const expanded = PROG.expandProgram(template, { weeks });
-    const check = PROG.validateVolume(template.days);
-
-    await W.saveProgram({ ...expanded, id: 'current', startDate: todayKey() });
-    S.program = { ...expanded, id: 'current', startDate: todayKey() };
-    closeSheet();
-    toast(check.ok ? 'Program built' : `Program built · ${check.issues[0].message}`, check.ok ? 'ok' : 'warn');
-    S.tab = 'today'; render();
+    await commitProgram(PROG.expandProgram(template, { weeks: 5 }), template.days);
   }, 'Could not build the program'),
+
+  'do-plan': () => guard(async () => {
+    const text = $('#pl-q')?.value?.trim();
+    if (!text) return toast('Say how you want to train first', 'warn');
+
+    const out = $('#pl-out');
+    out.innerHTML = '<div class="center" style="padding:10px"><span class="spinner"></span></div>';
+
+    planChat.turns.push({ role: 'user', content: text });
+    const result = await AI.planProgram({
+      turns: planChat.turns,
+      profile: S.profile,
+      prefs: prefsList(),
+      candidates: planCandidates(),
+    });
+
+    /* Strict schema guarantees a string id, not a REAL one. Anything the
+       library does not recognise is dropped rather than saved and then
+       exploding later when the logger tries to render it. */
+    if (result.status === 'proposal') {
+      result.days = (result.days || []).map((d) => ({
+        ...d, blocks: (d.blocks || []).filter((b) => EX.BY_ID[b.exerciseId]),
+      })).filter((d) => d.blocks.length);
+      if (!result.days.length) throw new Error('The coach proposed exercises you do not have. Try again.');
+    }
+
+    planChat.turns.push({ role: 'assistant', content: JSON.stringify(result) });
+    planChat.proposal = result;
+    programSheet();
+  }, 'The coach could not build that'),
+
+  'save-plan': () => guard(async () => {
+    const p = planChat.proposal;
+    if (p?.status !== 'proposal') return;
+
+    const template = {
+      id: 'current', name: 'Custom plan', goal: S.profile.goal,
+      days: p.days, startDate: todayKey(),
+    };
+    /* Anything durable the conversation surfaced is remembered, deduped so the
+       same preference does not pile up across rebuilds. */
+    const merged = [...new Set([...prefsList(), ...(p.learned || [])])].slice(0, 25);
+    await W.saveProfile({ coachPrefs: merged });
+    S.profile.coachPrefs = merged;
+
+    await commitProgram(PROG.expandProgram(template, { weeks: 5 }), p.days);
+    planChat.turns = []; planChat.proposal = null;
+  }, 'Could not save the program'),
+
+  'drop-pref': (el) => guard(async () => {
+    const next = prefsList().filter((_, i) => i !== +el.dataset.i);
+    await W.saveProfile({ coachPrefs: next });
+    S.profile.coachPrefs = next;
+    programSheet();
+  }),
+
+  'clear-prefs': () => guard(async () => {
+    await W.saveProfile({ coachPrefs: [] });
+    S.profile.coachPrefs = [];
+    programSheet();
+  }),
+
+  'photo-meal': () => openSheet('Photograph a meal', `
+    <p class="tiny muted" style="margin-top:0">The photo is read on Cloudflare, which
+    is free but small. It is good at naming food and poor at judging portions, so it
+    gives you a description to correct before any numbers are worked out.</p>
+    <form id="photo-meal-form">
+      <div class="field"><label for="pm-file">Photo</label>
+        <input id="pm-file" name="file" type="file" accept="image/*" capture="environment" required></div>
+      <button class="btn primary wide" type="submit">Read the plate</button>
+    </form>
+    <div id="pm-out"></div>`),
 
   'do-food-search': () => guard(async () => {
     const q = $('#f-q')?.value?.trim();
@@ -1379,6 +1517,20 @@ const ACTIONS = {
       confirmMealSheet(result);
     }
   }, 'The coach could not work that out'),
+
+
+  'photo-to-macros': () => guard(async () => {
+    const text = $('#pm-desc')?.value?.trim();
+    if (!text) return toast('Describe what is on the plate', 'warn');
+
+    mealChat.turns = [{ role: 'user', content: text }];
+    mealChat.asked = 0;
+    const result = await AI.logMeal(mealChat.turns, mealChat.asked);
+    mealChat.turns.push({ role: 'assistant', content: JSON.stringify(result) });
+
+    if (result.status === 'needs_clarification') { mealChat.asked++; describeSheet(); }
+    else confirmMealSheet(result);
+  }, 'Could not work out the macros'),
 
   'pick-lift': (el) => { S.statLift = el.value; render(); },
 
@@ -1703,6 +1855,30 @@ const FORMS = {
     mealChat.turns = []; mealChat.asked = 0;
   },
 
+
+  'photo-meal-form': async (d, form) => {
+    const file = form.querySelector('input[type=file]').files[0];
+    if (!file) return;
+    const out = $('#pm-out');
+    out.innerHTML = '<div class="center" style="padding:10px"><span class="spinner"></span>'
+      + '<div class="tiny muted" style="margin-top:8px">Reading the plate…</div></div>';
+
+    /* 640px is plenty for identifying food and keeps the upload small, which
+       matters because the vision free tier is a shared daily neuron budget. */
+    const { dataUrl } = await DB.compressImage(file, { maxSize: 640, maxBytes: 110_000 });
+    const { description } = await AI.describeMealPhoto(dataUrl);
+
+    openSheet('Is this right?', `
+      <img src="${dataUrl}" alt="the meal" style="width:100%;max-height:200px;object-fit:cover;border-radius:12px;margin-bottom:12px">
+      <div class="field">
+        <label for="pm-desc">What it saw. Fix anything wrong, especially portions.</label>
+        <textarea id="pm-desc" style="min-height:100px">${esc(description)}</textarea>
+      </div>
+      <p class="tiny faint">Portion size is where a small vision model struggles, and
+      portion is most of the calories. Worth a glance.</p>
+      <button class="btn primary wide" data-act="photo-to-macros">Work out the macros</button>`);
+  },
+
   'cardio-form': async (d) => {
     const c = {
       date: todayKey(), exerciseId: d.exerciseId,
@@ -1875,7 +2051,11 @@ async function boot() {
   /* Both modules reach the Worker with the same auth, so they are configured
      together. With no WORKER_URL they simply stay dormant. */
   const getToken = () => DB.getIdToken();
-  AI.configure({ workerUrl: WORKER_URL ? `${WORKER_URL}/ai` : '', getToken });
+  AI.configure({
+    workerUrl: WORKER_URL ? `${WORKER_URL}/ai` : '',
+    visionUrl: WORKER_URL ? `${WORKER_URL}/vision` : '',
+    getToken,
+  });
   FOOD.configure({ foodUrl: WORKER_URL ? `${WORKER_URL}/food` : '', getToken });
 
   DB.onAuth(async (user) => {
