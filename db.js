@@ -15,7 +15,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
-  signOut as fbSignOut, onAuthStateChanged, updateProfile,
+  sendPasswordResetEmail, signOut as fbSignOut, onAuthStateChanged, updateProfile,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection,
@@ -74,6 +74,15 @@ export async function signIn(email, password) {
 export const signOut = () => fbSignOut(auth);
 
 /**
+ * Email a password reset link.
+ *
+ * The way out of auth/invalid-credential when the password is the thing that
+ * is wrong. Firebase resolves silently for an unknown address (that is its
+ * email-enumeration protection), so the UI says "check your email" either way.
+ */
+export const resetPassword = (email) => sendPasswordResetEmail(auth, email.trim());
+
+/**
  * A fresh Firebase ID token for the Worker.
  *
  * Not forced to refresh: the SDK already refreshes an hour before expiry, and
@@ -84,7 +93,11 @@ export const getIdToken = async () => (auth.currentUser ? auth.currentUser.getId
 /** Friendly text for the auth errors that actually happen. */
 export function authErrorMessage(err) {
   const code = err?.code || '';
-  if (code.includes('invalid-credential') || code.includes('wrong-password')) return 'Wrong email or password.';
+  /* Firebase collapses "no such account" into invalid-credential when email
+     enumeration protection is on, so this one message has to cover both. */
+  if (code.includes('invalid-credential') || code.includes('wrong-password')) {
+    return 'Wrong email or password. Use "Forgot password?" if you are not sure.';
+  }
   if (code.includes('user-not-found')) return 'No account with that email.';
   if (code.includes('email-already-in-use')) return 'That email already has an account. Sign in instead.';
   if (code.includes('weak-password')) return 'Password needs to be at least 6 characters.';
