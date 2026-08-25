@@ -1373,24 +1373,7 @@ const ACTIONS = {
   /* One picker serves the live session and the plan editor. `pickFor` says
      where the choice lands; without it the two would need duplicate sheets and
      duplicate search boxes that drift apart. */
-  'choose-ex': (el) => {
-    const id = el.dataset.id;
-
-    if (pickFor?.kind === 'plan') {
-      planEdit[pickFor.day].blocks.push({ exerciseId: id, sets: 3, repMin: 8, repMax: 12 });
-      planEditSheet();
-      return;
-    }
-
-    if (!S.session) S.session = { name: 'Workout', startedAt: Date.now(), entries: [] };
-    const last = lastPerformance(id);
-    S.session.entries.push({
-      exerciseId: id,
-      target: PROG.nextTarget({ exerciseId: id, sets: 3, repMin: 8, repMax: 12 }, last),
-      sets: Array.from({ length: 3 }, () => ({ weight: last?.weight ?? '', reps: '', done: false })),
-    });
-    closeSheet();
-  },
+  'choose-ex': (el) => placeExercise(el.dataset.id),
 
   'swap-ex': (el) => {
     const i = +el.dataset.i;
@@ -1398,18 +1381,54 @@ const ACTIONS = {
     const opts = EX.findSwaps(entry.exerciseId, activeEquipment());
     if (!opts.length) return toast('No swap available with your equipment', 'warn');
     pickFor = { kind: 'session-swap', index: i };
-    openPicker('Swap exercise', opts.slice(0, 30), i);
+    openPicker('Swap exercise', opts.slice(0, 30));
   },
 
-  'do-swap': (el) => {
-    if (pickFor?.kind === 'plan-swap') {
-      planEdit[pickFor.day].blocks[pickFor.index].exerciseId = el.dataset.id;
-      planEditSheet();
+
+  /* ---------- an exercise the library does not have ---------- */
+
+  'new-exercise': () => customExerciseSheet(),
+
+  'save-custom-ex': () => guard(async () => {
+    const name = ($('#cx-name')?.value || '').trim();
+    if (!name) return toast('Give it a name first', 'warn');
+
+    const primary = [...document.querySelectorAll('[data-mc-muscle][aria-pressed="true"]')]
+      .map((b) => b.dataset.mcMuscle);
+    if (!primary.length) return toast('Pick at least one muscle', 'warn');
+
+    const id = EX.customId(name);
+    const existing = S.profile?.customExercises || [];
+
+    /* Already in the library, either as a custom entry or as a built-in whose
+       name slugs to the same thing. Placing it is what was wanted anyway. */
+    if (EX.BY_ID[id]) {
+      toast(`${EX.BY_ID[id].name} is already in the list`, 'warn');
+      placeExercise(id);
       return;
     }
-    S.session.entries[+el.dataset.i].exerciseId = el.dataset.id;
-    closeSheet();
-  },
+
+    const custom = {
+      id,
+      name,
+      pattern: $('#cx-pattern')?.value || 'isolation',
+      type: primary.length > 1 ? 'compound' : 'isolation',
+      primary,
+      secondary: [],
+      /* No equipment on purpose. The whole reason for adding one by hand is
+         that the library does not cover it, so gating it behind an equipment
+         tick would hide it again the moment it was created. */
+      equipment: [],
+    };
+
+    const customExercises = [...existing, custom];
+    await W.saveProfile({ customExercises });
+    S.profile.customExercises = customExercises;
+    EX.registerCustom([custom]);
+
+    toast(`${name} added`, 'ok');
+    placeExercise(id);
+  }, 'Could not add that exercise'),
 
   'del-workout': (el) => guard(async () => {
     if (!confirm('Delete this session?')) return;
@@ -1918,27 +1937,114 @@ let pickFor = { kind: 'session' };
  * The search box filters in place rather than re-rendering, because a render
  * would rebuild the input and drop focus after the first keystroke.
  */
-function openPicker(title, list, swapIndex) {
+/**
+ * Put a chosen exercise wherever the picker was opened from.
+ *
+ * All four cases live together because they used to live in two actions that
+ * each knew about half of `pickFor`, and adding a fifth entry point (an
+ * exercise typed in by hand) would have meant teaching a third caller the same
+ * four rules.
+ */
+function placeExercise(id) {
+  const where = pickFor?.kind;
+
+  if (where === 'plan') {
+    planEdit[pickFor.day].blocks.push({ exerciseId: id, sets: 3, repMin: 8, repMax: 12 });
+    planEditSheet();
+    return;
+  }
+
+  if (where === 'plan-swap') {
+    planEdit[pickFor.day].blocks[pickFor.index].exerciseId = id;
+    planEditSheet();
+    return;
+  }
+
+  if (where === 'session-swap' && S.session?.entries[pickFor.index]) {
+    S.session.entries[pickFor.index].exerciseId = id;
+    closeSheet();
+    return;
+  }
+
+  if (!S.session) S.session = { name: 'Workout', startedAt: Date.now(), entries: [] };
+  const last = lastPerformance(id);
+  S.session.entries.push({
+    exerciseId: id,
+    target: PROG.nextTarget({ exerciseId: id, sets: 3, repMin: 8, repMax: 12 }, last),
+    sets: Array.from({ length: 3 }, () => ({ weight: last?.weight ?? '', reps: '', done: false })),
+  });
+  closeSheet();
+}
+
+/** Name it, say what it hits, and it joins the library for good. */
+function customExerciseSheet() {
+  const typed = ($('#ex-q')?.value || '').trim();
+
+  openSheet('Add your own exercise', `
+    <p class="tiny muted" style="margin-top:0">For anything the list does not have.
+    It gets saved for next time and counts towards your volume and body map like
+    any other exercise.</p>
+
+    <div class="field">
+      <label for="cx-name">Call it</label>
+      <input id="cx-name" value="${esc(typed)}" autocomplete="off" placeholder="Reformer Footwork">
+    </div>
+
+    <div class="field">
+      <label for="cx-pattern">Movement</label>
+      <select id="cx-pattern">
+        ${EX.PATTERNS.map((p) => `<option value="${p}" ${p === 'isolation' ? 'selected' : ''}>${esc(EX.PATTERN_LABELS[p] || p)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Muscles it hits <span class="faint">(pick at least one)</span></label>
+      <div class="chips">
+        ${EX.MUSCLES.map((mu) => `<button type="button" class="chip sm" data-mc-muscle="${mu}"
+          aria-pressed="false">${esc(EX.MUSCLE_LABELS[mu])}</button>`).join('')}
+      </div>
+    </div>`,
+  `<button class="btn primary wide" data-act="save-custom-ex">Add it</button>`);
+}
+
+function openPicker(title, list) {
   openSheet(title, `
     <div class="field"><input id="ex-q" placeholder="Search exercises" autocomplete="off"
       oninput="window.__filterEx(this.value)"></div>
-    <div id="ex-list">${exerciseRows(list.slice(0, 60), swapIndex)}</div>`);
+    <button class="btn wide sm" data-act="new-exercise" style="margin-bottom:12px">
+      + Add one that is not here</button>
+    <div id="ex-list">${exerciseRows(list.slice(0, 60))}</div>`);
 
   window.__filterEx = (q) => {
     const t = q.trim().toLowerCase();
     const hits = t ? list.filter((e) => e.name.toLowerCase().includes(t)) : list;
     const target = $('#ex-list');
-    if (target) target.innerHTML = exerciseRows(hits.slice(0, 60), swapIndex);
+    if (target) {
+      target.innerHTML = hits.length
+        ? exerciseRows(hits.slice(0, 60))
+        : `<div class="empty tiny">Nothing called "${esc(q.trim())}".
+           <br><button class="btn sm" data-act="new-exercise" style="margin-top:10px">Add it yourself</button></div>`;
+    }
   };
 }
 
-const exerciseRows = (list, swapIndex) => list.map((e) => `
+/*
+ * One action, one source of truth for where the choice lands.
+ *
+ * These rows used to take a `swapIndex` argument that decided both the label
+ * and the action, which meant every caller had to remember to pass it.
+ * `ped-swap` did not, so the plan's swap sheet rendered "Add" buttons wired to
+ * the add path. `pickFor` already knows; the rows read it directly.
+ */
+const exerciseRows = (list) => {
+  const swapping = String(pickFor?.kind || '').endsWith('-swap');
+  return list.map((e) => `
   <div class="list-row">
     <div class="grow"><b class="ellip">${esc(e.name)}</b>
       <span class="tiny muted">${esc(e.primary.map((m) => EX.MUSCLE_LABELS[m]).join(', '))}</span></div>
-    <button class="btn sm" data-act="${swapIndex != null ? 'do-swap' : 'choose-ex'}"
-      data-id="${e.id}" ${swapIndex != null ? `data-i="${swapIndex}"` : ''}>${swapIndex != null ? 'Use' : 'Add'}</button>
+    <button class="btn sm" data-act="choose-ex" data-id="${e.id}">${swapping ? 'Use' : 'Add'}</button>
   </div>`).join('') || '<div class="empty tiny">Nothing matches.</div>';
+};
 
 function lastPerformance(exerciseId) {
   for (const w of S.workouts) {

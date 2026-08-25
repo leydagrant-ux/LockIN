@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **261 / 261 passing**
+- `http://localhost:8777/selftest.html` — **263 / 263 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,7 +57,7 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 261 regression checks | Passing |
+| `selftest.js/.html` | 263 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
@@ -86,6 +86,28 @@ real browser against `?demo`:
 would earn cardio points and contribute nothing to the body map, which is
 exactly backwards. The button lives in the Cardio tab because that is where
 Grant asked for it.
+
+### Add an exercise by hand (v0.3.1)
+
+Ashtin hit a movement the 149-exercise library does not have. The picker now
+carries **+ Add one that is not here** at the top, and a search that finds
+nothing offers the same thing. Name it, pick the movement and the muscles, and
+it joins the library permanently and lands wherever the picker was opened from.
+
+Hand-added exercises carry **no equipment requirement**, deliberately: the
+reason one is being typed in is that the library does not cover it, so gating it
+behind an equipment tick would hide it again the moment it was created.
+
+They are stored per account on `profile.customExercises`, the same field the
+machine-photo flow writes, so they do not cross between the two accounts.
+
+**A real bug came out of this.** `ped-swap` never passed the `swapIndex` that
+`exerciseRows` used to decide its label and action, so the plan editor's Swap
+sheet rendered "Add" buttons wired to the add path. The rows now read `pickFor`
+directly and there is one placement function, `placeExercise`, instead of two
+actions that each knew half the rules. Both swap sheets were verified to
+replace rather than append, including when the replacement is an exercise
+created on the spot.
 
 ### Needs a Worker redeploy
 

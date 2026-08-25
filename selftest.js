@@ -844,6 +844,16 @@ section('anatomy');
   check('a machine with no muscles still gets one', X.BY_ID.custom_bare.primary.length === 1);
 
   eq('an entry with no name is refused', X.registerCustom([{ id: 'custom_nameless' }]), 0);
+
+  /* An exercise typed in by hand carries NO equipment, deliberately. The reason
+     it is being typed in is that the library does not cover it, so requiring a
+     piece of kit would hide it again the moment it was created. */
+  X.registerCustom([{ id: 'custom_reformer_footwork', name: 'Reformer Footwork',
+    pattern: 'squat', primary: ['quads'], equipment: [] }]);
+  check('a hand-added exercise shows up with no equipment ticked at all',
+    X.availableExercises([]).some((e) => e.id === 'custom_reformer_footwork'));
+  check('and still shows up in a fully kitted gym',
+    X.availableExercises(X.ALL_EQUIPMENT).some((e) => e.id === 'custom_reformer_footwork'));
 }
 
 /* ============================== classes and cardio ============================== */
