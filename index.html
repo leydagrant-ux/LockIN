@@ -71,7 +71,11 @@ a { color:var(--accent); }
 .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg); padding:16px; margin-bottom:12px; }
 .card.tight { padding:12px 14px; }
 .card-title { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin:0 0 12px; font-weight:600; }
-.card-title.row { display:flex; justify-content:space-between; align-items:center; }
+/* `row` is the flex utility. It only ever existed as `.card-title.row`, so
+   every bare `class="row"` in ui.js was silently stacking its children into a
+   column. `.card-title.row` now layers space-between on top of it. */
+.row { display:flex; align-items:center; gap:10px; }
+.card-title.row { justify-content:space-between; }
 
 .stat { font:800 30px/1 system-ui; letter-spacing:-.03em; }
 .stat small { font-size:13px; color:var(--dim); font-weight:500; letter-spacing:0; }

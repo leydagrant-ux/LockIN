@@ -142,6 +142,35 @@ The review textarea sets `font-family` rather than the `font` shorthand. The
 shorthand reset the 16px the stylesheet sets, and anything under 16px makes iOS
 Safari zoom the page in the moment the field is tapped.
 
+### Removing a set or an exercise mid-workout (v0.3.3)
+
+Grant fat-fingered "add set" during a session and had no way back. Editing is
+now a MODE rather than a control on every row: a small **Edit** in the logger
+header, and while it is on, each exercise's **Swap** becomes **Remove** and each
+set's tick becomes a red minus. Nothing new appears in the normal state, and
+because the controls take the place of ones already there, the rows do not
+reflow when the mode flips.
+
+Both removals show an **Undo** for seven seconds. A set with numbers in it is
+real work, and this is a one-handed tap by someone who has just been under a
+bar. Removing the last set of an exercise removes the exercise too, since an
+exercise with no sets reads as broken.
+
+The Edit control is 24px of glyph inside a 44px hit box, via negative margins,
+so the header stays 20px tall.
+
+**A layout bug came out of this that had been shipping for three versions.**
+`.row` was never defined as a flex utility — only `.card-title.row` was — so
+every bare `class="row"` was stacking its children into a column. That meant the
+review sheet's three stats, the grade block's score, and the plan editor's
+"3 sets of 8 to 12" inputs were all stacked vertically on both phones. I had
+verified those screens by querying values and never by looking at them. `.row`
+is now a real utility and all four sites were checked visually.
+
+`?demo&logger` opens straight into a live session and `?demo&logger=edit` into
+its edit mode. Headless Chrome gets a clean profile every run and cannot click,
+so without it the logger is the one screen that can never be seen.
+
 ### Needs a Worker redeploy
 
 `worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,

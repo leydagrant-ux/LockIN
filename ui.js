@@ -145,6 +145,40 @@ const toast = (msg, kind = 'info') => {
   setTimeout(() => el.remove(), 3200);
 };
 
+const exName = (id) => EX.BY_ID[id]?.name || id;
+
+/**
+ * A toast that can be taken back.
+ *
+ * Longer-lived than an ordinary toast, because reading it and deciding takes
+ * longer than reading it. Only one is ever on screen: a second removal replaces
+ * the first, so an undo button can never refer to the wrong thing.
+ */
+let undoEl = null;
+
+function undoToast(message, undo) {
+  undoEl?.remove();
+
+  const el = document.createElement('div');
+  el.className = 'banner float info';
+  el.style.cssText = 'position:fixed;left:16px;right:16px;bottom:calc(var(--tab-h) + var(--safe-b) + 14px);z-index:60;max-width:608px;margin:0 auto;box-shadow:0 8px 24px rgba(0,0,0,.5);display:flex;align-items:center;gap:12px';
+
+  const text = document.createElement('span');
+  text.style.flex = '1';
+  text.textContent = message;
+
+  const btn = document.createElement('button');
+  btn.className = 'btn sm';
+  btn.textContent = 'Undo';
+  btn.addEventListener('click', () => { el.remove(); undoEl = null; undo(); });
+
+  el.append(text, btn);
+  document.body.appendChild(el);
+  undoEl = el;
+
+  setTimeout(() => { if (undoEl === el) { el.remove(); undoEl = null; } }, 7000);
+}
+
 async function guard(fn, label = 'That did not work') {
   if (S.busy) return;
   S.busy = true;
@@ -629,13 +663,31 @@ function sessionCard(sess) {
   </div>`;
 }
 
+/*
+ * Editing is a MODE, not a control on every row.
+ *
+ * A remove button beside every set and every exercise is a dozen red crosses
+ * sitting under your thumb for the whole workout, and the thing you actually do
+ * a hundred times is type numbers. So the removal controls only exist while
+ * editing, and they take the place of controls that are already there rather
+ * than adding a column, which keeps the rows from reflowing when the mode
+ * flips.
+ */
+let loggerEdit = false;
+
 function loggerCard() {
   const s = S.session;
+  const editing = loggerEdit && s.entries.length > 0;
   return `<div class="card">
     <div class="card-title row">
       <span>${esc(s.name || 'Workout')}</span>
-      <span class="faint tiny" id="clock">${elapsed(s.startedAt)}</span>
+      <span class="row" style="gap:10px;align-items:center">
+        <span class="faint tiny" id="clock">${elapsed(s.startedAt)}</span>
+        ${s.entries.length ? `<button class="btn sm ghost" data-act="logger-edit"
+          style="padding:12px 10px;margin:-12px -10px -12px 0;min-height:0;${editing ? 'color:var(--accent)' : ''}">${editing ? 'Done' : 'Edit'}</button>` : ''}
+      </span>
     </div>
+    ${editing ? '<div class="banner info" style="margin-bottom:14px">Tap the minus on a set, or Remove on an exercise. You get one chance to undo.</div>' : ''}
     ${s.entries.map((entry, ei) => {
       const ex = EX.BY_ID[entry.exerciseId];
       const target = entry.target;
@@ -645,7 +697,9 @@ function loggerCard() {
             <b class="ellip">${esc(ex?.name || entry.exerciseId)}</b>
             ${target ? `<span class="tiny muted">${esc(target.reason)}</span>` : ''}
           </div>
-          <button class="btn sm ghost" data-act="swap-ex" data-i="${ei}">Swap</button>
+          ${editing
+            ? `<button class="btn sm ghost" data-act="del-entry" data-i="${ei}" style="color:var(--bad)">Remove</button>`
+            : `<button class="btn sm ghost" data-act="swap-ex" data-i="${ei}">Swap</button>`}
         </div>
         ${entry.sets.map((set, si) => `
           <div class="list-row" style="gap:8px;padding:5px 0;border:0">
@@ -656,8 +710,11 @@ function loggerCard() {
             <input style="flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:9px;min-height:40px"
               type="number" inputmode="numeric" placeholder="reps"
               value="${set.reps ?? ''}" data-set="reps" data-i="${ei}" data-j="${si}">
-            <button class="chip sm" style="min-width:42px" data-act="toggle-set" data-i="${ei}" data-j="${si}"
-              aria-pressed="${set.done === true}">${set.done ? '✓' : '○'}</button>
+            ${editing
+              ? `<button class="chip sm" style="min-width:42px;color:var(--bad)" data-act="del-set"
+                  data-i="${ei}" data-j="${si}" aria-label="Remove set ${si + 1}">&minus;</button>`
+              : `<button class="chip sm" style="min-width:42px" data-act="toggle-set" data-i="${ei}" data-j="${si}"
+                  aria-pressed="${set.done === true}">${set.done ? '✓' : '○'}</button>`}
           </div>`).join('')}
         <button class="btn sm ghost" data-act="add-set" data-i="${ei}">+ set</button>
       </div>`;
@@ -1343,15 +1400,52 @@ const ACTIONS = {
 
   'cancel-session': () => {
     if (!confirm('Discard this session? Nothing will be saved.')) return;
-    S.session = null; render();
+    S.session = null; loggerEdit = false; render();
   },
 
   /* Walking away is the normal case, not the exception: you rack the bar, you
      go to the bathroom, the phone locks. The session stays exactly where it
      was, on this device, until it is finished or explicitly thrown away. */
-  'pause-session': () => { S.session.paused = true; render(); },
+  'pause-session': () => { S.session.paused = true; loggerEdit = false; render(); },
   'resume-session': () => { S.session.paused = false; render(); },
   'back-to-session': () => { S.tab = 'today'; if (S.session) S.session.paused = false; render(); },
+
+  'logger-edit': () => { loggerEdit = !loggerEdit; render(); },
+
+  /* Both removals are undoable for a few seconds. A set with numbers already
+     in it is real work, and this is a control being tapped one-handed, mid
+     workout, by someone who has just been under a bar. */
+  'del-set': (el) => {
+    const i = +el.dataset.i, j = +el.dataset.j;
+    const entry = S.session.entries[i];
+    const [set] = entry.sets.splice(j, 1);
+
+    /* An exercise with no sets left reads as broken. Removing the last set
+       means removing the exercise, which is what was meant anyway. */
+    const alsoEntry = entry.sets.length === 0 ? S.session.entries.splice(i, 1)[0] : null;
+    if (!S.session.entries.length) loggerEdit = false;
+    render();
+
+    undoToast(alsoEntry ? `${exName(alsoEntry.exerciseId)} removed` : 'Set removed', () => {
+      if (alsoEntry) S.session.entries.splice(i, 0, alsoEntry);
+      S.session.entries[i].sets.splice(j, 0, set);
+      loggerEdit = true;
+      render();
+    });
+  },
+
+  'del-entry': (el) => {
+    const i = +el.dataset.i;
+    const [entry] = S.session.entries.splice(i, 1);
+    if (!S.session.entries.length) loggerEdit = false;
+    render();
+
+    undoToast(`${exName(entry.exerciseId)} removed`, () => {
+      S.session.entries.splice(i, 0, entry);
+      loggerEdit = true;
+      render();
+    });
+  },
 
   'add-set': (el) => {
     const entry = S.session.entries[+el.dataset.i];
@@ -1948,6 +2042,7 @@ const ACTIONS = {
     const prs = STATS.newPRsIn(saved, S.workouts);
     S.workouts = [saved, ...S.workouts];
     S.session = null;
+    loggerEdit = false;
     await publishScore();
 
     /* What you actually did becomes the plan. Changing exercises mid-session is
@@ -2569,7 +2664,8 @@ function bootDemo() {
 
   /* ?demo&tab=body jumps straight to a screen, which is how each one gets
      screenshotted during review. */
-  const wanted = new URLSearchParams(location.search).get('tab');
+  const params = new URLSearchParams(location.search);
+  const wanted = params.get('tab');
   if (wanted) S.tab = wanted;
 
   S.partnerUid = 'demo-ashtin';
@@ -2589,6 +2685,15 @@ function bootDemo() {
   /* Demo only: exposes state so a browser session can inspect it. */
   window.__S = S;
   render();
+
+  /* ?demo&logger opens straight into a live session, and &logger=edit into its
+     edit mode. Headless Chrome gets a clean profile every run and cannot click,
+     so without this the logger is the one screen that can never be looked at. */
+  const logger = params.get('logger');
+  if (logger !== null) {
+    ACTIONS['start-session']();
+    if (S.session && logger === 'edit') ACTIONS['logger-edit']();
+  }
 }
 
 
