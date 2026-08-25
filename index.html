@@ -199,6 +199,16 @@ input[type=range]::-moz-range-thumb { width:24px; height:24px; border-radius:50%
 .banner.ok { background:rgba(70,211,154,.1); border:1px solid rgba(70,211,154,.28); color:var(--good); }
 .banner.info { background:var(--surface-2); border:1px solid var(--line); color:var(--dim); }
 
+/* A toast floats over whatever is on screen, so it needs an OPAQUE base. The
+   inline tints above are 10% alpha, which is right inside a card and unreadable
+   sitting on top of another control. These are those same tints composited over
+   the sheet background, so a floating toast looks identical to an inline one. */
+.banner.float { background-color:#1e2530; }
+.banner.float.warn { background-color:#2e2c25; }
+.banner.float.bad  { background-color:#2e222d; }
+.banner.float.ok   { background-color:#1c2f32; }
+.banner.float.info { background-color:#1e2530; }
+
 .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700;
         letter-spacing:.03em; text-transform:uppercase; }
 .pill.pr { background:var(--warn); color:#3a2600; }

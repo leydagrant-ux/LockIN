@@ -207,6 +207,18 @@ const VISION_PROMPTS = {
     'the movement it is used for in plain gym language, for example "seated leg ' +
     'curl machine", "cable crossover", "hack squat sled". Two sentences at most. ' +
     'If it is not gym equipment, say so in one short sentence.',
+
+  /* Transcription, NOT interpretation. A lab result is numbers, units and
+     reference ranges, and every one of them has to survive the trip
+     unchanged — a model that "tidies" 13.8 to 13.5 has invented a result. The
+     app shows this text back for correction before anything is structured. */
+  document:
+    'Transcribe every piece of text in this photo of a document, exactly as it ' +
+    'is printed. Keep numbers, units and reference ranges character for ' +
+    'character. Keep the line and column order. Do not summarise, do not ' +
+    'interpret, do not correct anything, and do not add commentary. If part of ' +
+    'it is unreadable, write [unclear] in its place rather than guessing. If ' +
+    'this is not a document, say so in one short sentence.',
 };
 
 function dataUrlToBytes(dataUrl) {
@@ -238,6 +250,9 @@ async function handleVision(body, env, cors) {
   const errors = [];
   for (const attempt of VISION_ATTEMPTS) {
     try {
+      /* A lab page is far more text than a plate of food. */
+      const maxTokens = body.subject === 'document' ? 1200 : 300;
+
       const input = attempt.style === 'messages'
         ? {
           messages: [{
@@ -247,9 +262,9 @@ async function handleVision(body, env, cors) {
               { type: 'image_url', image_url: { url: dataUrl } },
             ],
           }],
-          max_tokens: 300,
+          max_tokens: maxTokens,
         }
-        : { image: [...dataUrlToBytes(dataUrl)], prompt, max_tokens: 300 };
+        : { image: [...dataUrlToBytes(dataUrl)], prompt, max_tokens: maxTokens };
 
       const res = await env.AI.run(attempt.model, input);
       const text = (res?.response ?? res?.result?.response ?? res?.description ?? '').trim();

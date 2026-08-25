@@ -109,6 +109,33 @@ actions that each knew half the rules. Both swap sheets were verified to
 replace rather than append, including when the replacement is an exercise
 created on the spot.
 
+### Photographed lab documents (v0.3.2)
+
+Ashtin photographed a lab report and hit "Photos of documents are not supported
+yet". They are now, through the same  route, with a third prompt
+subject: , which transcribes rather than describes.
+
+**The transcription is shown back for correction before a word of it is
+structured, and that step cannot be skipped.** This is the one screen in the app
+where a misread digit changes the meaning: a ferritin of 13 and a ferritin of
+130 are different conversations. The prompt is told to write  rather
+than guess. A PDF skips the review entirely, because a text layer is exact.
+
+Multiple files can be picked at once for a multi-page report, and photos are
+compressed to 1600px rather than the 640px a meal photo gets, because small
+print is the entire payload.
+
+Two bugs fixed alongside it:
+
+- **A failed save left a spinner that never stopped**, with the button gone and
+  the hand-corrected transcription trapped behind it. It now restores a "Try
+  saving again" button and keeps the text.
+- ** was the only write not going through the  facade**, so
+  demo mode could not stub it and it hung against an uninitialised Firebase.
+- **Toasts were see-through.** The  tints are 10% alpha, which is right
+  inside a card and unreadable floating on top of another control. 
+  carries those same tints composited over the sheet background.
+
 ### Needs a Worker redeploy
 
 `worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,

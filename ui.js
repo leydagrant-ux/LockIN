@@ -45,6 +45,7 @@ const W = {
   publishScore: (...a) => DB.publishScore(...a),
   rememberFood: (...a) => DB.rememberFood(...a),
   addPhoto: (...a) => DB.addPhoto(...a),
+  addHealthDoc: (...a) => DB.addHealthDoc(...a),
   importAll: (...a) => DB.importAll(...a),
 };
 
@@ -137,7 +138,7 @@ const resumeBar = () => (S.session && S.tab !== 'today' && S.profile?.complete
 
 const toast = (msg, kind = 'info') => {
   const el = document.createElement('div');
-  el.className = `banner ${kind}`;
+  el.className = `banner float ${kind}`;
   el.style.cssText = 'position:fixed;left:16px;right:16px;bottom:calc(var(--tab-h) + var(--safe-b) + 14px);z-index:60;max-width:608px;margin:0 auto;box-shadow:0 8px 24px rgba(0,0,0,.5)';
   el.textContent = msg;
   document.body.appendChild(el);
@@ -1674,13 +1675,46 @@ const ACTIONS = {
     suggests medication or supplements. Anything out of range gets flagged for your doctor.</div>
     <form id="health-form">
       <div class="field"><label for="h-file">Lab PDF or photo</label>
-        <input id="h-file" name="file" type="file" accept="application/pdf,image/*,text/plain" required></div>
+        <input id="h-file" name="file" type="file" accept="application/pdf,image/*,text/plain" multiple required></div>
       <div class="switch"><span>Share with ${esc(partnerName() || 'partner')}</span>
         <input type="checkbox" name="shared"></div>
       <button class="btn primary wide" type="submit" style="margin-top:12px">Read it</button>
     </form>
-    <p class="tiny faint">Text is pulled from the file in your browser. Only the extracted text
-    is sent for structuring, never the original file.</p>`),
+    <p class="tiny faint">A PDF is read in your browser and only the text leaves the phone.
+    A photo has to be read by the camera model first, and you get to check what it found
+    before any of it is saved. Pick more than one file for a multi-page report.</p>`),
+
+  /* Photographed numbers are checked by a human before anything is structured.
+     See healthReviewSheet for why this step is not optional. */
+  'health-structure': () => guard(async () => {
+    const text = ($('#hd-text')?.value || '').trim();
+    if (!text) return toast('There is nothing to save', 'warn');
+
+    const out = $('#hd-actions');
+    if (out) out.innerHTML = '<div class="center" style="padding:10px"><span class="spinner"></span></div>';
+
+    try {
+      const parsed = await AI.parseHealthDocument(text);
+      await W.addHealthDoc({
+        parsed, rawText: text,
+        filename: healthDraft?.filename || 'photo',
+        shared: !!healthDraft?.shared,
+      });
+      S.health = await DB.listEntries('health', { max: 40 });
+      healthDraft = null;
+      closeSheet();
+      toast('Document saved', 'ok');
+    } catch (err) {
+      /* Put the button back. Without this a failed save leaves a spinner that
+         never stops and no way to retry, and the transcription the person just
+         corrected by hand is trapped behind it. */
+      const slot = $('#hd-actions');
+      if (slot) {
+        slot.innerHTML = `<button class="btn primary wide" data-act="health-structure">Try saving again</button>`;
+      }
+      throw err;
+    }
+  }, 'Could not read that document'),
 
   'quick-cardio': () => openSheet('Log cardio', `
     <form id="cardio-form">
@@ -2384,14 +2418,27 @@ const FORMS = {
   },
 
   'health-form': async (d, form) => {
-    const file = form.querySelector('input[type=file]').files[0];
-    if (!file) return;
-    toast('Reading the document…');
-    const text = await extractText(file);
-    if (!text.trim()) throw new Error('Could not read any text from that file.');
+    const files = [...form.querySelector('input[type=file]').files];
+    if (!files.length) return;
+
+    const photos = files.filter((f) => f.type.startsWith('image/'));
+    toast(photos.length ? 'Reading the photo…' : 'Reading the document…');
+
+    const parts = [];
+    for (const file of files) parts.push(await extractText(file));
+    const text = parts.join('\n\n').trim();
+    if (!text) throw new Error('Could not read any text from that file.');
+
+    healthDraft = { text, shared: !!d.shared, filename: files.map((f) => f.name).join(', ') };
+
+    /* A PDF's text layer is exact, so there is nothing for a human to check.
+       A photo went through a small vision model, so there is. */
+    if (photos.length) return healthReviewSheet();
+
     const parsed = await AI.parseHealthDocument(text);
-    await DB.addHealthDoc({ parsed, rawText: text, filename: file.name, shared: !!d.shared });
+    await W.addHealthDoc({ parsed, rawText: text, filename: healthDraft.filename, shared: healthDraft.shared });
     S.health = await DB.listEntries('health', { max: 40 });
+    healthDraft = null;
     closeSheet();
     toast('Document saved', 'ok');
   },
@@ -2417,7 +2464,47 @@ async function extractText(file) {
     }
     return out;
   }
-  throw new Error('Photos of documents are not supported yet. Upload the PDF, or paste the numbers by hand.');
+  if (file.type.startsWith('image/')) {
+    /* Compressed harder on size than a meal photo and not at all on quality:
+       small print is the entire payload here, and a soft JPEG of a lab table
+       is a page of guesses. */
+    const { dataUrl } = await DB.compressImage(file, { maxSize: 1600, maxBytes: 900_000 });
+    const seen = await AI.describePhoto(dataUrl, 'document');
+    return seen.description || '';
+  }
+
+  throw new Error('That file type cannot be read. Use a PDF, a photo, or paste the numbers by hand.');
+}
+
+/* Survives the trip from the upload form to the review sheet. */
+let healthDraft = null;
+
+/**
+ * Show a photographed document back before a word of it is structured.
+ *
+ * This step is deliberately not skippable. The vision model is a small free one
+ * and this is the one screen in the app where a misread digit matters: a
+ * ferritin of 13 and a ferritin of 130 are different conversations. A PDF skips
+ * this, because a text layer is exact.
+ */
+function healthReviewSheet() {
+  openSheet('Check what it read', `
+    <div class="banner warn">Check the numbers against the paper before saving.
+    This was read by a camera, and a misread digit here is worse than no reading at all.</div>
+    <div class="field">
+      <label for="hd-text">What it found <span class="faint">(edit anything wrong)</span></label>
+      <!-- font-family, NOT the font shorthand: the shorthand would reset the
+           16px the stylesheet sets, and anything under 16px makes iOS Safari
+           zoom the page in the moment the field is tapped. Monospace because
+           lab results are columns and they only line up in a fixed pitch. -->
+      <textarea id="hd-text" style="min-height:220px;line-height:1.5;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${esc(healthDraft?.text || '')}</textarea>
+    </div>
+    <div id="hd-actions">
+      <button class="btn primary wide" data-act="health-structure">This is right, save it</button>
+    </div>
+    <p class="tiny faint">Anything marked [unclear] could not be read. Type it in yourself
+    or delete the line.</p>`);
 }
 
 
