@@ -112,29 +112,35 @@ created on the spot.
 ### Photographed lab documents (v0.3.2)
 
 Ashtin photographed a lab report and hit "Photos of documents are not supported
-yet". They are now, through the same  route, with a third prompt
-subject: , which transcribes rather than describes.
+yet". They are now, through the same `/vision` route, with a third prompt
+subject `document`, which transcribes rather than describes.
 
 **The transcription is shown back for correction before a word of it is
 structured, and that step cannot be skipped.** This is the one screen in the app
 where a misread digit changes the meaning: a ferritin of 13 and a ferritin of
-130 are different conversations. The prompt is told to write  rather
-than guess. A PDF skips the review entirely, because a text layer is exact.
+130 are different conversations. The prompt is told to write `[unclear]` rather
+than guess at anything it cannot read. A PDF skips the review entirely, because
+a text layer is exact and there is nothing for a human to check.
 
-Multiple files can be picked at once for a multi-page report, and photos are
-compressed to 1600px rather than the 640px a meal photo gets, because small
-print is the entire payload.
+Multiple files can be picked at once for a multi-page report, and photos go up
+at 1600px rather than the 640px a meal photo gets, because small print is the
+entire payload here.
 
-Two bugs fixed alongside it:
+Three bugs fixed alongside it:
 
 - **A failed save left a spinner that never stopped**, with the button gone and
   the hand-corrected transcription trapped behind it. It now restores a "Try
   saving again" button and keeps the text.
-- ** was the only write not going through the  facade**, so
+- **`addHealthDoc` was the only write not going through the `W` facade**, so
   demo mode could not stub it and it hung against an uninitialised Firebase.
-- **Toasts were see-through.** The  tints are 10% alpha, which is right
-  inside a card and unreadable floating on top of another control. 
-  carries those same tints composited over the sheet background.
+- **Toasts were see-through.** The `.banner` tints are 10% alpha, which is right
+  inside a card and unreadable floating on top of another control. That is what
+  made the message overlap the Share switch in Ashtin's screenshot.
+  `.banner.float` carries those same tints composited over the sheet background.
+
+The review textarea sets `font-family` rather than the `font` shorthand. The
+shorthand reset the 16px the stylesheet sets, and anything under 16px makes iOS
+Safari zoom the page in the moment the field is tapped.
 
 ### Needs a Worker redeploy
 
@@ -225,6 +231,12 @@ silently in the first cut:
   string literal, which is an unterminated string. It has now happened twice.
   Use the Write tool for anything large, and for anything containing a
   backslash, always.
+- **This machine's Bash tool does not honour a quoted heredoc delimiter.**
+  `<<'EOF'` still performs command substitution and still collapses
+  backslashes, so backticks in a commit message run as commands and a `\n`
+  arrives as a real newline. It has now silently corrupted a source file and a
+  markdown file. Write anything containing a backtick or a backslash to a file
+  with the Write tool and run that instead.
 - **`node --check` is not a syntax check here.** It parses as a script, and it
   happily passed the exact file the browser refused to load. Import it as a
   module instead; see the Tests section of the README.
