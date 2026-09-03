@@ -81,6 +81,118 @@ export function currentStreak(activeDates, asOf = new Date()) {
   return streak;
 }
 
+/* ============================== rest days ============================== */
+
+/*
+ * A streak that a planned rest day resets is a streak that punishes training
+ * properly. Grant lifts Monday to Friday and rests the weekend; counting only
+ * consecutive active days told him he had a one-day streak every Monday.
+ *
+ * So a run survives rest days, up to `allowance` of them BACK TO BACK. Going
+ * over the weekly budget on scattered days does not break it — that already
+ * costs adherence points in scoreWeek(), and docking it twice for one behaviour
+ * would be double-counting.
+ */
+export const DEFAULT_REST_ALLOWANCE = 2;
+
+/* Midday, so a run spanning a DST boundary does not gain or lose an hour and
+   round to the wrong day. Every date walk in this file uses it. */
+const noon = (d) => { const x = new Date(d); x.setHours(12, 0, 0, 0); return x; };
+const shiftDay = (d, n) => { const x = noon(d); x.setDate(x.getDate() + n); return x; };
+const dayDiff = (a, b) => Math.round((noon(b) - noon(a)) / 86400000);
+
+/* Sparse data must not spin forever looking for a day that is not there. */
+const MAX_WALK = 400;
+
+/**
+ * The current streak, counting rest days as part of it.
+ *
+ * `days` is CALENDAR days, not training days: a week of Monday-to-Friday
+ * training with the weekend off reads 8 on the following Monday, not 6. The
+ * habit stayed alive the whole time, and a number that climbs on a rest day is
+ * the point of allowing rest days at all.
+ *
+ * @param {string[]} activeDates YYYY-MM-DD, any order, duplicates fine
+ * @param {object}  [opts]
+ * @param {number}  [opts.allowance] rest days permitted back to back
+ * @param {Date}    [opts.asOf]      treat this as today
+ * @returns {{days:number, activeDays:number, restDays:number, alive:boolean, restRun:number}}
+ */
+export function restStreak(activeDates, opts = {}) {
+  const allowance = Math.max(0, Number(opts.allowance ?? DEFAULT_REST_ALLOWANCE) || 0);
+  const active = new Set(activeDates || []);
+  const today = noon(opts.asOf || new Date());
+
+  /* Consecutive dead days ending today, today included. The UI uses this to
+     warn that today is the last day to train before the run ends. */
+  let restRun = 0;
+  for (let i = 0; i < MAX_WALK; i++) {
+    if (active.has(dayKey(shiftDay(today, -i)))) break;
+    restRun++;
+  }
+
+  const dead = { days: 0, activeDays: 0, restDays: 0, alive: false, restRun };
+  if (active.size === 0) return dead;
+
+  /* Today not being logged yet does not break anything — at 9am you have not
+     trained. Everything is measured to yesterday instead, the same grace
+     currentStreak() already gives. */
+  const edge = active.has(dayKey(today)) ? today : shiftDay(today, -1);
+
+  /* Back up to the most recent day with activity. More than `allowance` dead
+     days between it and the edge and the run is already over. */
+  let cursor = edge;
+  let gap = 0;
+  while (!active.has(dayKey(cursor))) {
+    gap += 1;
+    if (gap > allowance) return dead;
+    cursor = shiftDay(cursor, -1);
+  }
+
+  /* Walk back through the run. An active day extends it and clears the rest
+     counter; too many rest days in a row ends it. */
+  let start = cursor;
+  let activeDays = 1;
+  let run = 0;
+  cursor = shiftDay(cursor, -1);
+
+  for (let i = 0; i < MAX_WALK; i++) {
+    if (active.has(dayKey(cursor))) {
+      activeDays += 1;
+      start = cursor;
+      run = 0;
+    } else {
+      run += 1;
+      if (run > allowance) break;
+    }
+    cursor = shiftDay(cursor, -1);
+  }
+
+  const days = dayDiff(start, today) + 1;
+  return { days, activeDays, restDays: days - activeDays, alive: true, restRun };
+}
+
+/**
+ * Days in one ISO week with no activity at all, counted only as far as today.
+ *
+ * A week still in progress must not report its remaining days as rest already
+ * taken, or Monday morning would read "6 rest days used".
+ */
+export function restDaysUsed(activeDates, weekKey, asOf = new Date()) {
+  const active = new Set(activeDates || []);
+  const { start, end } = weekRange(weekKey);
+  const today = noon(asOf);
+  const last = today < end ? today : end;
+
+  let used = 0;
+  let cursor = noon(start);
+  while (cursor <= last) {
+    if (!active.has(dayKey(cursor))) used += 1;
+    cursor = shiftDay(cursor, 1);
+  }
+  return used;
+}
+
 /* ============================== scoring ============================== */
 
 /* Points available per component. Adherence dominates by design; see the file

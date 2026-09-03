@@ -878,6 +878,103 @@ section('anatomy');
     X.CORE_EXERCISES().every((e) => e.pattern === 'core'));
 }
 
+/* ============================== rest-day streaks ============================== */
+
+{
+  section('rest-day streaks');
+
+  /* A real calendar week, so the day names in the comments below are true:
+     Mon 2026-08-24 through Sun 2026-08-30, with Mon 2026-08-31 following. */
+  const MON = '2026-08-24', TUE = '2026-08-25', WED = '2026-08-26';
+  const THU = '2026-08-27', FRI = '2026-08-28', SAT = '2026-08-29', SUN = '2026-08-30';
+  const NEXT_MON = new Date('2026-08-31T09:00:00');
+  const NEXT_TUE = new Date('2026-09-01T09:00:00');
+
+  /* Grant's first case: lift Monday to Friday, rest the weekend, and on Monday
+     morning before training the run is still alive and reads EIGHT — five
+     training days plus two rested plus today. */
+  const weekdays = [MON, TUE, WED, THU, FRI];
+  const a = S.restStreak(weekdays, { asOf: NEXT_MON });
+  check('a rested weekend does not break the run', a.alive);
+  eq('and the run counts calendar days, not training days', a.days, 8);
+  eq('training days are still reported', a.activeDays, 5);
+  eq('as are the rest days inside it', a.restDays, 3);
+
+  /* Grant's second case: rest Friday because he is sore, train Saturday, rest
+     Sunday. Never two off in a row, so the run is untouched. */
+  const split = [MON, TUE, WED, THU, SAT];
+  const b = S.restStreak(split, { asOf: NEXT_MON });
+  check('rest days split around a session keep the run', b.alive);
+  eq('and it spans the same eight days', b.days, 8);
+
+  /* Three off in a row is where it ends. */
+  const c = S.restStreak(weekdays, { asOf: NEXT_TUE });
+  check('three rest days in a row breaks it', !c.alive);
+  eq('and a broken run is zero, not negative', c.days, 0);
+
+  /* The boundary, checked from both sides rather than assumed. */
+  eq('exactly the allowance survives',
+    S.restStreak([MON], { asOf: new Date('2026-08-27T09:00:00'), allowance: 2 }).days, 4);
+  check('one past the allowance does not',
+    !S.restStreak([MON], { asOf: new Date('2026-08-28T09:00:00'), allowance: 2 }).alive);
+
+  /* Today being unlogged must never zero someone out at 9am. */
+  const todayOnly = S.restStreak([FRI], { asOf: new Date('2026-08-29T09:00:00') });
+  eq('an untrained today does not end yesterday-s run', todayOnly.days, 2);
+  check('and it is still alive', todayOnly.alive);
+
+  /* allowance 0 has to reduce exactly to the old rule, which is what makes it
+     safe to keep both functions in the file. */
+  const strict = (dates, asOf) => S.restStreak(dates, { allowance: 0, asOf }).days;
+  eq('allowance 0 matches currentStreak on an unbroken run',
+    strict(weekdays, new Date('2026-08-28T09:00:00')),
+    S.currentStreak(weekdays, new Date('2026-08-28T09:00:00')));
+  eq('allowance 0 matches currentStreak across a gap',
+    strict(weekdays, NEXT_MON),
+    S.currentStreak(weekdays, NEXT_MON));
+
+  eq('no history is a zero streak', S.restStreak([], { asOf: NEXT_MON }).days, 0);
+  eq('one session today is a one day streak',
+    S.restStreak([FRI], { asOf: new Date('2026-08-28T09:00:00') }).days, 1);
+  eq('a session three weeks ago is not a streak',
+    S.restStreak([MON], { asOf: new Date('2026-09-20T09:00:00') }).days, 0);
+
+  /* restRun drives the "train today or lose it" warning, so it counts today. */
+  eq('a rest run counts today', S.restStreak(weekdays, { asOf: NEXT_MON }).restRun, 3);
+  eq('and is zero on a day that was trained',
+    S.restStreak(weekdays, { asOf: new Date('2026-08-28T09:00:00') }).restRun, 0);
+
+  /* Duplicates and unsorted input are what activeDates can actually contain. */
+  eq('order and duplicates do not matter',
+    S.restStreak([FRI, MON, WED, MON, TUE, THU], { asOf: NEXT_MON }).days, 8);
+}
+
+/* ============================== the weekly rest budget ============================== */
+
+{
+  section('rest budget');
+
+  const WEEK = '2026-W35';                       /* Mon 2026-08-24 to Sun 2026-08-30 */
+  const weekdays = ['2026-08-24', '2026-08-25', '2026-08-26', '2026-08-27', '2026-08-28'];
+  const after = new Date('2026-09-10T09:00:00'); /* well past the week */
+
+  eq('a finished week reports every day off', S.restDaysUsed(weekdays, WEEK, after), 2);
+  eq('a fully trained week used none',
+    S.restDaysUsed([...weekdays, '2026-08-29', '2026-08-30'], WEEK, after), 0);
+  eq('an empty week is all seven', S.restDaysUsed([], WEEK, after), 7);
+
+  /* A week in progress must count only as far as today, or Monday morning
+     would report six rest days already taken. */
+  eq('a week in progress stops at today',
+    S.restDaysUsed(weekdays, WEEK, new Date('2026-08-26T09:00:00')), 0);
+  eq('and counts the days actually missed so far',
+    S.restDaysUsed(['2026-08-24'], WEEK, new Date('2026-08-26T09:00:00')), 2);
+
+  /* Activity outside the week must not leak into it. */
+  eq('days from other weeks are ignored',
+    S.restDaysUsed(['2026-08-23', '2026-08-31'], WEEK, after), 7);
+}
+
 /* ============================== report ============================== */
 
 export function runAll() {

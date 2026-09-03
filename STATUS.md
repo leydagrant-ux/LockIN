@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **263 / 263 passing**
+- `http://localhost:8777/selftest.html` — **289 / 289 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,7 +57,7 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 263 regression checks | Passing |
+| `selftest.js/.html` | 289 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
@@ -170,6 +170,52 @@ is now a real utility and all four sites were checked visually.
 `?demo&logger` opens straight into a live session and `?demo&logger=edit` into
 its edit mode. Headless Chrome gets a clean profile every run and cannot click,
 so without it the logger is the one screen that can never be seen.
+
+### Rest days, and looking back at a week (v0.3.4)
+
+**Streaks now survive rest days.** `currentStreak()` counted consecutive ACTIVE
+days, so Grant's Monday-to-Friday split reported a one-day streak every Monday.
+`restStreak()` sits beside it — the old function is untouched and its tests are
+unchanged — and lets a run survive up to `allowance` rest days **back to back**.
+
+Two decisions Grant made, both worth not re-litigating:
+
+- **Going over the weekly rest budget does not break the streak.** Only too many
+  in a row does. Resting more already means training less, which the adherence
+  component docks on its own; penalising it twice would be double-counting one
+  behaviour. The overage is stated plainly on Today and in the week review.
+- **The streak counts calendar days, not training days.** Mon-Fri plus a rested
+  weekend reads **8** on Monday, not 6. A number that climbs on a rest day is
+  the whole point of allowing rest days.
+
+`restDaysPerWeek` is set in onboarding beside "days per week", 0 to 4, default
+2. Profiles that predate it fall through to `DEFAULT_REST_ALLOWANCE`, so neither
+account has to do anything.
+
+**Any past week can now be opened** from a Past weeks card on the Stats tab,
+directly under This Week rather than below the charts. The sheet carries the
+grade out of 100, the six-component breakdown, rest days used against the
+allowance, every session (each tappable through to its own review), cardio and
+classes, and sets per muscle group. The partner's score for that week comes free
+because published scores were already stored per week.
+
+`AI.weeklyReview()` and `REVIEW_SCHEMA` had been sitting in `ai.js` **written and
+never called** since the first build. They are now wired to a button. The result
+is cached in memory per week rather than persisted: `firestore.rules` denies any
+collection it does not name, so a `reviews` collection would fail silently until
+the rules were republished by hand, and this way browsing weeks costs nothing.
+
+**The bug that mattered here:** `myScore()` filtered `date >= weekStart` with no
+upper bound. Correct for the current week, where nothing is logged in the
+future, and silently wrong for every past week. `weekScore(weekKey)` bounds both
+ends; `myScore()` is now a one-line wrapper. Verified by asserting no session in
+a week sheet falls outside that week's dates.
+
+26 new selftest cases, including both of Grant's worked examples and a proof
+that `allowance: 0` reduces exactly to `currentStreak()`.
+
+`?demo&week=last` opens a past week for screenshotting, for the same reason
+`?demo&logger` exists.
 
 ### Needs a Worker redeploy
 

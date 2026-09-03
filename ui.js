@@ -319,16 +319,34 @@ const weekWorkouts = () => {
   return S.workouts.filter((w) => w.date >= from);
 };
 
-function myScore() {
-  const week = thisWeek();
-  const { start } = SCORE.weekRange(week);
-  const from = SCORE.dayKey(start);
+const restAllowance = () =>
+  Math.max(0, num(S.profile?.restDaysPerWeek, SCORE.DEFAULT_REST_ALLOWANCE));
 
-  const workouts = S.workouts.filter((w) => w.date >= from);
-  const cardio = S.cardio.filter((c) => c.date >= from);
-  const meals = S.meals.filter((m) => m.date >= from);
-  const checkins = S.checkins.filter((c) => c.date >= from);
-  const metrics = S.metrics.filter((m) => m.date >= from);
+/** The streak as it stood on a given day, rest days included. */
+const myStreak = (asOf) => SCORE.restStreak(
+  STATS.activeDates(S.workouts, S.cardio),
+  { allowance: restAllowance(), asOf: asOf || new Date() },
+);
+
+/**
+ * Score any ISO week, past or present.
+ *
+ * The upper date bound matters and is easy to leave out: this used to filter
+ * `date >= from` only, which is correct for the current week because nothing is
+ * logged in the future, and silently wrong for every past week, which would
+ * have swept in everything since.
+ */
+function weekScore(weekKey) {
+  const { start, end } = SCORE.weekRange(weekKey);
+  const from = SCORE.dayKey(start);
+  const to = SCORE.dayKey(end);
+  const inWeek = (d) => d >= from && d <= to;
+
+  const workouts = S.workouts.filter((w) => inWeek(w.date));
+  const cardio = S.cardio.filter((c) => inWeek(c.date));
+  const meals = S.meals.filter((m) => inWeek(m.date));
+  const checkins = S.checkins.filter((c) => inWeek(c.date));
+  const metrics = S.metrics.filter((m) => inWeek(m.date));
 
   const targets = STATS.macroTargets(S.profile || {}, S.profile?.goal);
   const days = STATS.nutritionDays(meals, targets);
@@ -336,16 +354,22 @@ function myScore() {
   const planned = num(S.profile?.daysPerWeek, 4);
   const fromPlan = workouts.filter((w) => w.plannedDay != null).length;
 
+  /* The streak as it stood when that week closed, not today's. */
+  const now = new Date();
+  const asOf = end < now ? end : now;
+
   return SCORE.scoreWeek({
     plannedSessions: planned,
     completedSessions: Math.min(fromPlan || workouts.length, planned),
     totalSessions: workouts.length,
     nutritionDaysOnTarget: days.filter((d) => d.onTarget).length,
     cardioMinutes: cardio.reduce((s, c) => s + num(c.minutes), 0),
-    streak: SCORE.currentStreak(STATS.activeDates(S.workouts, S.cardio)),
+    streak: myStreak(asOf).days,
     checkins: checkins.length + metrics.length,
   }, { plannedSessions: planned });
 }
+
+const myScore = () => weekScore(thisWeek());
 
 /** Today's prescribed session, adjusted for how the person says they feel. */
 function todaySession() {
@@ -530,6 +554,13 @@ const stepTraining = () => `
       <input id="o-mins" name="minutes" type="number" inputmode="numeric" min="15" max="180" step="5" required value="${esc(draft.minutes || 60)}"></div>
   </div>
   <div class="field">
+    <label for="o-rest">Rest days a week</label>
+    <input id="o-rest" name="restDaysPerWeek" type="number" inputmode="numeric" min="0" max="4"
+      required value="${esc(draft.restDaysPerWeek ?? 2)}">
+    <p class="tiny faint" style="margin:6px 0 0">How many days off you allow yourself. Your streak
+    survives this many in a row, so two means a normal weekend never costs you anything.</p>
+  </div>
+  <div class="field">
     <label for="o-lim">Injuries or things to avoid <span class="faint">(optional)</span></label>
     <textarea id="o-lim" name="limitations" placeholder="Cranky left shoulder on overhead pressing">${esc(draft.limitations || '')}</textarea>
   </div>`;
@@ -559,15 +590,14 @@ const stepEquipment = () => `
 function todayView() {
   const checkin = S.checkins.find((c) => c.date === todayKey());
   const sess = todaySession();
-  const streak = SCORE.currentStreak(STATS.activeDates(S.workouts, S.cardio));
+  const streak = streakLine();
   const loggedToday = S.workouts.some((w) => w.date === todayKey());
 
   return `<div class="screen">
     <div class="top">
       <div>
         <h1>${greeting()}</h1>
-        <div class="sub">${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}
-          ${streak ? ` · ${plural(streak, 'day', 'days')} streak` : ''}</div>
+        <div class="sub">${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}${streak}</div>
       </div>
     </div>
 
@@ -597,6 +627,31 @@ function todayView() {
 
     ${recentCard()}
   </div>`;
+}
+
+/**
+ * The streak, and what is left of this week's rest budget.
+ *
+ * Going over the budget is stated, not punished: resting more already means
+ * training less, which the adherence component docks on its own. Saying it
+ * twice would be double-counting one behaviour.
+ */
+function streakLine() {
+  const st = myStreak();
+  if (!st.alive) return '';
+
+  const allow = restAllowance();
+  const left = allow - SCORE.restDaysUsed(STATS.activeDates(S.workouts, S.cardio), thisWeek());
+
+  /* restRun counts today. Once it passes the allowance, today is the last day
+     the run can survive, because tomorrow the gap to yesterday breaks it. */
+  const tail = st.restRun > allow
+    ? 'train today to keep it'
+    : left > 0 ? `${plural(left, 'rest day', 'rest days')} left`
+      : left === 0 ? 'rest days all used'
+        : `${plural(-left, 'day', 'days')} over your rest allowance`;
+
+  return ` · ${plural(st.days, 'day', 'days')} streak · ${tail}`;
 }
 
 function greeting() {
@@ -948,6 +1003,22 @@ function statsView() {
         </div>
       </div>`).join('')}
     </div>
+
+    ${pastWeeks().length ? `<div class="card">
+      <div class="card-title">Past weeks</div>
+      ${pastWeeks().map((k) => {
+        const sc = weekScore(k).total;
+        return `<div class="list-row" data-act="view-week" data-week="${esc(k)}" role="button" tabindex="0">
+          <div class="grow">
+            <b>${esc(weekLabel(k))}</b>
+            <span class="tiny muted">${esc(k)}</span>
+          </div>
+          <span class="pill" style="background:var(--surface-2);color:${gradeColor(sc)}">${sc}</span>
+          <span class="faint" aria-hidden="true">›</span>
+        </div>`;
+      }).join('')}
+      <p class="tiny faint" style="margin-bottom:0">Tap a week to see what you did and how it graded.</p>
+    </div>` : ''}
 
     <div class="card">
       <div class="card-title">Sets per muscle group</div>
@@ -1826,6 +1897,44 @@ const ACTIONS = {
       <button class="btn primary wide" type="submit">Save</button>
     </form>`),
 
+  /* ---------- looking back at a week ---------- */
+
+  'view-week': (el) => weekSheet(el.dataset.week),
+
+  'week-review': (el) => guard(async () => {
+    const weekKey = el.dataset.week;
+    const slot = $('#wk-review');
+    if (slot) slot.innerHTML = '<div class="center" style="padding:18px"><span class="spinner"></span></div>';
+
+    try {
+      const d = weekDetail(weekKey);
+      const review = await AI.weeklyReview({
+        week: weekKey,
+        dates: weekLabel(weekKey),
+        goal: PROG.GOALS[S.profile?.goal]?.label || 'general fitness',
+        score: { total: d.score.total, outOf: d.score.max },
+        breakdown: d.score.components.map((c) => `${c.label}: ${c.points}/${c.max} (${c.detail})`),
+        activeDays: d.activeDays,
+        restDays: { used: d.restUsed, allowed: d.restAllowed },
+        sessions: d.workouts.map((w) => ({
+          date: w.date, name: w.name || 'Workout',
+          sets: STATS.setCount(w), volumeLb: Math.round(STATS.tonnage(w)),
+        })),
+        cardioMinutes: d.cardio.reduce((n, c) => n + num(c.minutes), 0),
+        setsPerMuscleGroup: d.volume,
+      });
+
+      weekReviews.set(weekKey, review);
+      const after = $('#wk-review');
+      if (after) after.innerHTML = weekReviewBlock(weekKey);
+    } catch (err) {
+      /* Put the button back rather than leaving a spinner that never stops. */
+      const after = $('#wk-review');
+      if (after) after.innerHTML = weekReviewBlock(weekKey);
+      throw err;
+    }
+  }, 'The coach could not review that week'),
+
   /* ---------- looking back at a session ---------- */
 
   'view-workout': (el) => reviewSheet(el.dataset.id),
@@ -2349,6 +2458,7 @@ const FORMS = {
       goal: draft.goal || 'build_muscle', targetWeight: num(draft.targetWeight) || null,
       ideal: draft.ideal || '', experience: draft.experience || 'intermediate',
       daysPerWeek: num(draft.daysPerWeek, 4), minutes: num(draft.minutes, 60),
+      restDaysPerWeek: Math.min(4, Math.max(0, num(draft.restDaysPerWeek, 2))),
       limitations: draft.limitations || '',
       gymProfiles: [{ id: 'main', name: 'My gym', equipment: [...draft.equipment] }],
       activeGym: 'main', complete: true,
@@ -2694,6 +2804,11 @@ function bootDemo() {
     ACTIONS['start-session']();
     if (S.session && logger === 'edit') ACTIONS['logger-edit']();
   }
+
+  /* ?demo&week=last opens the most recent past week, for the same reason: a
+     sheet cannot be opened by a headless screenshot that cannot click. */
+  const wk = params.get('week');
+  if (wk) weekSheet(wk === 'last' ? pastWeeks()[0] : wk);
 }
 
 
@@ -3146,6 +3261,156 @@ function machineConfirmSheet() {
     <details style="margin-top:14px"><summary class="tiny faint">What the camera made of it</summary>
       <p class="tiny faint">${esc(m.description)}</p></details>`);
 }
+
+
+/* ============================== looking back at a week ============================== */
+
+/* Coach reviews are kept for the session only. Persisting them would need a new
+   Firestore collection, and firestore.rules denies anything it does not name
+   explicitly, so it would fail silently until the rules were republished by
+   hand. Caching here means browsing back and forth spends nothing; a reload
+   costs one call if you ask again. */
+const weekReviews = new Map();
+
+const weekLabel = (key) => {
+  const { start, end } = SCORE.weekRange(key);
+  const fmt = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${fmt(start)} to ${fmt(end)}`;
+};
+
+/** Every ISO week with something logged in it, newest first, current week aside. */
+function pastWeeks(limit = 12) {
+  const keys = new Set();
+  const add = (date) => {
+    if (!date) return;
+    const d = new Date(`${date}T12:00:00`);
+    if (!Number.isNaN(d.getTime())) keys.add(SCORE.isoWeekKey(d));
+  };
+  S.workouts.forEach((w) => add(w.date));
+  S.cardio.forEach((c) => add(c.date));
+
+  const now = thisWeek();
+  /* Week keys are zero padded, so a string sort is a date sort. */
+  return [...keys].filter((k) => k !== now).sort().reverse().slice(0, limit);
+}
+
+/** Everything that happened in one week, gathered once for the sheet and the coach. */
+function weekDetail(weekKey) {
+  const { start, end } = SCORE.weekRange(weekKey);
+  const from = SCORE.dayKey(start);
+  const to = SCORE.dayKey(end);
+  const inWeek = (d) => d >= from && d <= to;
+
+  const workouts = S.workouts.filter((w) => inWeek(w.date)).sort((a, b) => a.date.localeCompare(b.date));
+  const cardio = S.cardio.filter((c) => inWeek(c.date)).sort((a, b) => a.date.localeCompare(b.date));
+
+  const active = STATS.activeDates(S.workouts, S.cardio)
+    .filter((d) => inWeek(d));
+
+  return {
+    weekKey,
+    score: weekScore(weekKey),
+    workouts,
+    cardio,
+    volume: STATS.volumeByGroup(workouts),
+    activeDays: active.length,
+    restUsed: SCORE.restDaysUsed(STATS.activeDates(S.workouts, S.cardio), weekKey),
+    restAllowed: restAllowance(),
+    partner: S.couple?.scores?.[weekKey]?.[S.partnerUid] || null,
+  };
+}
+
+function weekSheetBody(weekKey) {
+  const d = weekDetail(weekKey);
+  const g = d.score.total;
+  const overRest = d.restUsed > d.restAllowed;
+  const groups = Object.entries(d.volume).filter(([, sets]) => sets > 0)
+    .sort((a, b) => b[1] - a[1]);
+  const topSets = groups.length ? groups[0][1] : 0;
+
+  return `
+    <div class="row" style="gap:14px;margin-bottom:14px">
+      <div style="font:800 44px/1 system-ui;letter-spacing:-.04em;color:${gradeColor(g)}">${g}</div>
+      <div class="grow">
+        <b>${gradeWord(g)}</b>
+        <div class="tiny muted">${esc(weekLabel(weekKey))} &middot; ${plural(d.activeDays, 'active day', 'active days')}</div>
+      </div>
+      ${d.partner ? `<div style="text-align:right">
+        <div class="tiny faint">${esc(partnerName() || 'Partner')}</div>
+        <b style="color:${gradeColor(d.partner.total)}">${d.partner.total}</b>
+      </div>` : ''}
+    </div>
+
+    <div class="banner ${overRest ? 'warn' : 'info'}" style="margin-bottom:14px">
+      ${d.restUsed} of ${d.restAllowed} rest ${d.restAllowed === 1 ? 'day' : 'days'} used${
+        overRest ? '. Over your allowance, which is already reflected in the adherence score below.' : '.'}
+    </div>
+
+    <div class="card-title">Breakdown</div>
+    ${d.score.components.map((c) => `<div class="list-row">
+      <div class="grow">
+        <div style="display:flex;justify-content:space-between">
+          <b>${esc(c.label)}</b><span class="tiny muted">${c.points}/${c.max}</span>
+        </div>
+        <div class="bar" style="margin:6px 0 4px"><i style="width:${(c.points / c.max) * 100}%;background:var(--accent-dim)"></i></div>
+        <div class="tiny faint">${esc(c.detail)}</div>
+      </div>
+    </div>`).join('')}
+
+    <hr class="sep">
+    <div class="card-title">Sessions</div>
+    ${d.workouts.length ? d.workouts.map((w) => `<div class="list-row" data-act="view-workout" data-id="${esc(w.id)}" role="button" tabindex="0">
+      <div class="grow">
+        <b class="ellip">${esc(w.name || 'Workout')}</b>
+        <span class="tiny muted">${esc(w.date)} &middot; ${STATS.setCount(w)} sets &middot; ${Math.round(STATS.tonnage(w)).toLocaleString()} lb</span>
+      </div>
+      ${w.grade ? `<span class="pill" style="background:var(--surface-2);color:${gradeColor(w.grade.score)}">${w.grade.score}</span>` : ''}
+      <span class="faint" aria-hidden="true">&rsaquo;</span>
+    </div>`).join('') : '<div class="empty tiny">No sessions logged that week.</div>'}
+
+    ${d.cardio.length ? `<hr class="sep">
+    <div class="card-title">Cardio and classes</div>
+    ${d.cardio.map((c) => `<div class="list-row">
+      <div class="grow"><b class="ellip">${esc(cardioLabel(c))}</b>
+        <span class="tiny muted">${esc(c.date)} &middot; ${num(c.minutes)} min${
+          c.distance ? ` &middot; ${round(num(c.distance), 2)} mi` : ''}</span></div>
+    </div>`).join('')}` : ''}
+
+    ${groups.length ? `<hr class="sep">
+    <div class="card-title">Sets per muscle group</div>
+    ${groups.map(([group, sets]) => `<div class="list-row" style="border:0;padding:4px 0">
+      <span class="tiny" style="width:74px">${esc(EX.GROUP_LABELS[group] || group)}</span>
+      <div class="bar grow"><i style="width:${(sets / topSets) * 100}%;background:${GROUP_COLOR[group] || 'var(--accent-dim)'}"></i></div>
+      <span class="tiny faint" style="width:22px;text-align:right">${sets}</span>
+    </div>`).join('')}` : ''}
+
+    <hr class="sep">
+    <div id="wk-review">${weekReviewBlock(weekKey)}</div>`;
+}
+
+function weekReviewBlock(weekKey) {
+  const r = weekReviews.get(weekKey);
+  if (!r) {
+    return `<div class="card-title">What the coach thinks</div>
+      <p class="tiny muted" style="margin-top:0">Everything above is worked out on your phone.
+      This part asks the coach.</p>
+      <button class="btn wide sm" data-act="week-review" data-week="${esc(weekKey)}"
+        ${AI.isConfigured() ? '' : 'disabled'}>Ask the coach about this week</button>`;
+  }
+
+  const list = (title, items) => (items || []).length
+    ? `<div style="margin-top:10px"><div class="tiny faint">${title}</div>
+       ${items.map((t) => `<div class="tiny">&bull; ${esc(t)}</div>`).join('')}</div>`
+    : '';
+
+  return `<div class="card-title">What the coach thinks</div>
+    <p class="tiny" style="margin-top:0"><b>${esc(r.headline || '')}</b></p>
+    ${list('Went well', r.wins)}
+    ${list('Watch out', r.watchOuts)}
+    ${list('Next week', r.nextWeek)}`;
+}
+
+const weekSheet = (weekKey) => openSheet(`Week of ${weekLabel(weekKey)}`, weekSheetBody(weekKey));
 
 /* ============================== boot ============================== */
 
