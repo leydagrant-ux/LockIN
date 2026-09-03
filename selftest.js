@@ -1120,6 +1120,113 @@ section('anatomy');
     JSON.stringify(S.scoreWeek(noFood)));
 }
 
+/* ============================== the weekly schedule ============================== */
+
+{
+  section('weekday schedule');
+
+  /* Grant's actual split. */
+  const split = ['Pull', 'Push', 'Legs', 'Arms', 'Back and chest']
+    .map((name, i) => ({ name, weekday: i + 1, blocks: [] }));
+  const due = (weekday, completed) => {
+    const r = P.dueDay(split, { weekday, completed });
+    return r ? r.day.name : 'REST';
+  };
+
+  eq('Monday with nothing done is the first day', due(1, 0), 'Pull');
+  eq('Tuesday after Monday is the second', due(2, 1), 'Push');
+  eq('Thursday on schedule is the fourth', due(4, 3), 'Arms');
+
+  /* The whole point: a missed day slides rather than vanishing. */
+  eq('a missed Monday slides to Tuesday', due(2, 0), 'Pull');
+  eq('and the rest of the week slides with it', due(3, 1), 'Push');
+  eq('two missed days slide two', due(3, 0), 'Pull');
+
+  /* Caught up means rest, not a seventh workout. */
+  eq('Saturday with the week finished is a rest day', due(6, 5), 'REST');
+  eq('so is Sunday', due(7, 5), 'REST');
+  eq('and so is a Wednesday you are already ahead of', due(3, 3), 'REST');
+
+  /* THE BUG: the day used to come from a count that reset every Monday, so the
+     program snapped back to day one overnight. A new week starting at zero is
+     correct; what was wrong was that mid-week progress was measured by the same
+     resetting counter. Re-anchoring on Monday is now deliberate. */
+  eq('a new week re-anchors to the first day', due(1, 0), 'Pull');
+
+  /* Training twice in one day should not desynchronise the split. */
+  eq('being ahead on Monday just means rest', due(1, 2), 'REST');
+  eq('and Wednesday picks up where that left off', due(3, 2), 'Legs');
+
+  /* Days need not be consecutive. */
+  const mwf = [
+    { name: 'A', weekday: 1, blocks: [] },
+    { name: 'B', weekday: 3, blocks: [] },
+    { name: 'C', weekday: 5, blocks: [] },
+  ];
+  eq('Tuesday is a rest day on a Mon/Wed/Fri plan',
+    P.dueDay(mwf, { weekday: 2, completed: 1 }), null);
+  eq('Wednesday is the second session',
+    P.dueDay(mwf, { weekday: 3, completed: 1 }).day.name, 'B');
+  eq('a missed Monday still slides onto Wednesday',
+    P.dueDay(mwf, { weekday: 3, completed: 0 }).day.name, 'A');
+
+  /* Order of the array must not matter; the weekday decides. */
+  const shuffled = [split[2], split[0], split[4], split[1], split[3]];
+  eq('the weekday decides, not the array order',
+    P.dueDay(shuffled, { weekday: 1, completed: 0 }).day.name, 'Pull');
+  eq('and the index returned points into the ORIGINAL array',
+    P.dueDay(shuffled, { weekday: 1, completed: 0 }).index,
+    shuffled.findIndex((d) => d.name === 'Pull'));
+
+  /* A plan saved before weekdays existed has none at all. Treating those as
+     "never due" would declare every day a rest day and silently stop the app
+     prescribing anything. */
+  const legacy = [{ name: 'A', blocks: [] }, { name: 'B', blocks: [] }];
+  eq('a plan with no weekdays still prescribes',
+    P.dueDay(legacy, { weekday: 1, completed: 0 }).day.name, 'A');
+  eq('and still advances', P.dueDay(legacy, { weekday: 1, completed: 1 }).day.name, 'B');
+  eq('and still finishes', P.dueDay(legacy, { weekday: 7, completed: 2 }), null);
+
+  eq('an empty plan prescribes nothing', P.dueDay([], { weekday: 1, completed: 0 }), null);
+  eq('a missing plan prescribes nothing', P.dueDay(null, { weekday: 1 }), null);
+}
+
+/* ============================== assigning weekdays ============================== */
+
+{
+  section('default weekdays');
+
+  eq('five days is the working week', P.defaultWeekdays(5).join(','), '1,2,3,4,5');
+  eq('three days spreads across the week', P.defaultWeekdays(3).join(','), '1,3,5');
+  eq('four days avoids four in a row', P.defaultWeekdays(4).join(','), '1,2,4,5');
+  eq('seven days is every day', P.defaultWeekdays(7).length, 7);
+  eq('more than seven is clamped', P.defaultWeekdays(12).length, 7);
+  eq('zero still yields one day', P.defaultWeekdays(0).length, 1);
+
+  const filled = P.withWeekdays([{ name: 'A' }, { name: 'B' }, { name: 'C' }]);
+  eq('every day comes back with a weekday', filled.filter((d) => d.weekday).length, 3);
+  eq('using the spread pattern', filled.map((d) => d.weekday).join(','), '1,3,5');
+
+  const partial = P.withWeekdays([{ name: 'A', weekday: 6 }, { name: 'B' }]);
+  eq('an existing choice is left alone', partial[0].weekday, 6);
+  check('and the rest are filled in', !!partial[1].weekday);
+
+  const bogus = P.withWeekdays([{ name: 'A', weekday: 99 }]);
+  eq('an impossible weekday is replaced', bogus[0].weekday, 1);
+
+  /* Expansion must carry weekdays through, or every generated week loses them
+     and the schedule falls back to the legacy rotation. */
+  const expanded = P.expandProgram({
+    goal: 'build_muscle',
+    days: [{ name: 'A', blocks: [] }, { name: 'B', blocks: [] }],
+  }, { weeks: 2 });
+  check('expandProgram assigns weekdays',
+    expanded.weeks.every((w) => w.days.every((d) => !!d.weekday)));
+  eq('and keeps them identical across weeks',
+    expanded.weeks[0].days.map((d) => d.weekday).join(','),
+    expanded.weeks[1].days.map((d) => d.weekday).join(','));
+}
+
 /* ============================== report ============================== */
 
 export function runAll() {

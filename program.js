@@ -168,7 +168,7 @@ export function expandProgram(template, opts = {}) {
       week: w,
       deload: isDeload,
       label: isDeload ? 'Deload' : `Week ${w}`,
-      days: template.days.map((day) => ({
+      days: withWeekdays(template.days).map((day) => ({
         ...day,
         blocks: day.blocks.map((b) => {
           const ex = BY_ID[b.exerciseId];
@@ -187,6 +187,101 @@ export function expandProgram(template, opts = {}) {
     });
   }
   return { ...template, weeks: out };
+}
+
+/* ============================== the weekly schedule ============================== */
+
+/*
+ * Which day of the program is due today.
+ *
+ * This replaces a counter that picked the day from "how many workouts are
+ * logged in the current ISO week". That counter reset to zero every Monday, so
+ * the program snapped back to day one overnight; it was also advanced by ANY
+ * logged workout, so an ad-hoc session or a core session silently skipped a day
+ * of the split.
+ *
+ * The model now is: each day owns a weekday. A day is DUE once its weekday has
+ * arrived, and days are worked through in order. Miss one and it does not
+ * vanish, it simply stays at the front of the queue, so everything after it
+ * slides forward a day. The queue is measured against the current week only, so
+ * the whole schedule re-anchors to real weekdays every Monday and can never
+ * drift more than a week.
+ *
+ * A missed day needs no special handling anywhere: a day with nothing logged is
+ * already a rest day to score.js, which is what consumes the rest allowance.
+ */
+
+export const WEEKDAYS = [
+  { id: 1, short: 'Mon', label: 'Monday' },
+  { id: 2, short: 'Tue', label: 'Tuesday' },
+  { id: 3, short: 'Wed', label: 'Wednesday' },
+  { id: 4, short: 'Thu', label: 'Thursday' },
+  { id: 5, short: 'Fri', label: 'Friday' },
+  { id: 6, short: 'Sat', label: 'Saturday' },
+  { id: 7, short: 'Sun', label: 'Sunday' },
+];
+
+/* Sensible starting spreads. Three days a week wants Monday/Wednesday/Friday,
+   not three days back to back, and five wants the working week. */
+const DEFAULT_PATTERNS = {
+  1: [1], 2: [1, 4], 3: [1, 3, 5], 4: [1, 2, 4, 5],
+  5: [1, 2, 3, 4, 5], 6: [1, 2, 3, 4, 5, 6], 7: [1, 2, 3, 4, 5, 6, 7],
+};
+
+/** Default weekday for each of `count` training days. */
+export function defaultWeekdays(count) {
+  const n = Math.max(1, Math.min(7, Math.round(count) || 1));
+  return DEFAULT_PATTERNS[n].slice();
+}
+
+/** Give every day a weekday, leaving any that already has one alone. */
+export function withWeekdays(days) {
+  const list = days || [];
+  const fallback = defaultWeekdays(list.length);
+  return list.map((d, i) => ({
+    ...d,
+    weekday: WEEKDAYS.some((w) => w.id === d.weekday) ? d.weekday : fallback[i],
+  }));
+}
+
+/* Unassigned days sort last, and ties keep their original order so an edit
+   never silently reshuffles a plan. */
+const orderByWeekday = (days) => (days || [])
+  .map((d, i) => ({ d, i }))
+  .sort((a, b) => ((a.d.weekday || 99) - (b.d.weekday || 99)) || (a.i - b.i))
+  .map((x) => x.d);
+
+/**
+ * The session prescribed for today, or null for a rest day.
+ *
+ * @param {object[]} days       program day templates
+ * @param {object}   opts
+ * @param {number}   opts.weekday   1 (Monday) to 7 (Sunday)
+ * @param {number}   opts.completed program sessions already logged this week
+ * @returns {{index:number, day:object, due:number, remaining:number}|null}
+ */
+export function dueDay(days, opts = {}) {
+  const list = days || [];
+  if (!list.length) return null;
+
+  const weekday = Math.max(1, Math.min(7, Number(opts.weekday) || 1));
+  const completed = Math.max(0, Number(opts.completed) || 0);
+  const ordered = orderByWeekday(list);
+
+  /* A plan saved before weekdays existed has none. Falling back to "everything
+     is due" reproduces the old rotation rather than declaring every day a rest
+     day, which is what a strict reading would do. */
+  const assigned = ordered.some((d) => d.weekday);
+  const due = assigned
+    ? ordered.filter((d) => d.weekday && d.weekday <= weekday).length
+    : ordered.length;
+
+  if (completed >= due) return null;
+
+  const day = ordered[completed];
+  if (!day) return null;
+
+  return { index: list.indexOf(day), day, due, remaining: due - completed };
 }
 
 /* ============================== readiness ============================== */

@@ -384,6 +384,18 @@ function weekScore(weekKey) {
 const myScore = () => weekScore(thisWeek());
 
 /** Today's prescribed session, adjusted for how the person says they feel. */
+/** Sessions logged THIS WEEK that came from the program, not ad-hoc ones. */
+const programSessionsThisWeek = () => weekWorkouts().filter((w) => w.plannedDay != null).length;
+
+/**
+ * Today's prescribed session, or null on a rest day.
+ *
+ * The day used to be chosen by counting workouts logged in the current ISO
+ * week. That counter reset every Monday, so the program snapped back to day one
+ * overnight, and it was advanced by ANY logged workout, so a core session or an
+ * ad-hoc one silently skipped a day of the split. Days now own a weekday and
+ * PROG.dueDay decides; see the comment on it for how a missed day slides.
+ */
 function todaySession() {
   if (!S.program?.weeks?.length) return null;
 
@@ -392,20 +404,25 @@ function todaySession() {
   const week = S.program.weeks[Math.min(Math.max(0, weeksIn), S.program.weeks.length - 1)];
   if (!week) return null;
 
-  /* Rotate through the week's days by how many sessions are already logged
-     inside this ISO week — simple, and it survives a missed day without
-     stranding someone on Monday's workout all week. */
-  const done = weekWorkouts().length;
-  const day = week.days[done % week.days.length];
-  if (!day) return null;
+  const today = new Date();
+  const due = PROG.dueDay(week.days, {
+    weekday: today.getDay() || 7,               /* JS Sunday is 0; ISO wants 7 */
+    completed: programSessionsThisWeek(),
+  });
+  if (!due) return null;
 
   const checkin = S.checkins.find((c) => c.date === todayKey());
   const equipment = activeEquipment();
   const adjusted = checkin
-    ? PROG.adjustSession(day, checkin, equipment)
-    : { day, notes: [], changed: false, band: null, bandLabel: null, score: null };
+    ? PROG.adjustSession(due.day, checkin, equipment)
+    : { day: due.day, notes: [], changed: false, band: null, bandLabel: null, score: null };
 
-  return { ...adjusted, week: week.label, dayIndex: done % week.days.length };
+  return {
+    ...adjusted,
+    week: week.label,
+    dayIndex: due.index,
+    late: due.day.weekday && due.day.weekday < (today.getDay() || 7),
+  };
 }
 
 const activeEquipment = () => {
@@ -621,12 +638,12 @@ function todayView() {
 
     ${!S.session && checkin && sess ? sessionCard(sess) : ''}
 
-    ${!S.session && checkin && !sess ? `<div class="card">
+    ${!S.session && checkin && !sess ? (S.program ? restDayCard() : `<div class="card">
       <div class="card-title">No program yet</div>
       <p class="muted tiny" style="margin-top:0">Build one and it will show up here each day,
       already adjusted for how you said you feel.</p>
       <button class="btn primary wide" data-act="go-program">Build my program</button>
-    </div>` : ''}
+    </div>`) : ''}
 
     ${!S.session ? `<div class="btn-row" style="margin-bottom:12px">
       <button class="btn" data-act="quick-workout">Log a workout</button>
@@ -664,6 +681,56 @@ function streakLine() {
         : `${plural(-left, 'day', 'days')} over your rest allowance`;
 
   return ` · ${plural(st.days, 'day', 'days')} streak · ${tail}`;
+}
+
+/* Caught up, or nothing scheduled for today. Either way it is a rest day, and
+   saying so plainly beats an empty screen that looks like something broke. */
+function restDayCard() {
+  const next = nextScheduledDay();
+  return `<div class="card">
+    <div class="card-title">Rest day</div>
+    <p class="muted tiny" style="margin-top:0">Nothing scheduled for today${
+      next ? `. ${esc(next.sentence)}` : ''}.
+    Recovery is part of the plan, and your streak is safe.</p>
+    <div class="btn-row">
+      <button class="btn" data-act="quick-workout">Train anyway</button>
+      <button class="btn" data-act="quick-cardio">Log cardio</button>
+    </div>
+  </div>`;
+}
+
+/** The next day the program actually asks for something, for the rest-day copy. */
+function nextScheduledDay() {
+  const week = S.program?.weeks?.[0];
+  if (!week?.days?.length) return null;
+
+  const today = new Date().getDay() || 7;
+  const completed = programSessionsThisWeek();
+
+  for (let ahead = 1; ahead <= 7; ahead += 1) {
+    const weekday = ((today + ahead - 1) % 7) + 1;
+    /* Past Sunday the week restarts, so nothing counts as done any more. */
+    const wrapped = today + ahead > 7;
+    const due = PROG.dueDay(week.days, { weekday, completed: wrapped ? 0 : completed });
+    if (due) {
+      const label = ahead === 1
+        ? 'tomorrow'
+        : PROG.WEEKDAYS.find((w) => w.id === weekday)?.label || '';
+      const name = (due.day.name || '').trim();
+
+      /* People name days after weekdays. "Next up is Friday on Friday" is not a
+         sentence, so the name is dropped when it already says the same thing. */
+      const nameIsWeekday = PROG.WEEKDAYS.some((w) =>
+        w.label.toLowerCase() === name.toLowerCase() || w.short.toLowerCase() === name.toLowerCase());
+
+      const sentence = !name || nameIsWeekday
+        ? `Your next session is ${label}`
+        : `Next up is ${name}, ${label}`;
+
+      return { ...due, label, sentence };
+    }
+  }
+  return null;
 }
 
 function greeting() {
@@ -709,7 +776,7 @@ function sessionCard(sess) {
     : sess.band === 'primed' ? 'ok' : 'info';
   return `<div class="card">
     <div class="card-title row">
-      <span>${esc(sess.week)} · ${esc(sess.day.name || 'Today')}</span>
+      <span>${esc(sess.week)} · ${esc(sess.day.name || 'Today')}${sess.late ? ' · carried over' : ''}</span>
       ${sess.bandLabel ? `<span class="pill new" style="background:var(--surface-2);color:var(--dim)">${esc(sess.bandLabel)}</span>` : ''}
     </div>
     ${sess.changed ? `<div class="banner ${bandClass}">
@@ -1217,6 +1284,7 @@ function buildTemplate(profile) {
     return chosen;
   };
 
+  const weekdays = PROG.defaultWeekdays(days);
   const out = split.days.slice(0, days).map((patterns, i) => {
     const blocks = [];
 
@@ -1238,7 +1306,15 @@ function buildTemplate(profile) {
       gi++;
     }
 
-    return { name: `Day ${i + 1}`, focus: groups.map((g) => EX.GROUP_LABELS[g]).join(', '), blocks };
+    /* Named for what it trains, never for the weekday. The weekday picker owns
+       WHEN, and a day called "Thursday" that you then move to Wednesday is
+       simply wrong on screen. */
+    const labels = groups.map((g) => EX.GROUP_LABELS[g]).filter(Boolean);
+    const name = labels.length
+      ? labels.slice(0, 2).join(' and ')
+      : `Day ${i + 1}`;
+
+    return { name, weekday: weekdays[i], focus: labels.join(', '), blocks };
   });
 
   return { id: 'current', name: split.name, goal: profile.goal, days: out, startDate: todayKey() };
@@ -2052,7 +2128,7 @@ const ACTIONS = {
   },
 
   'save-plan-edit': () => guard(async () => {
-    const days = planEdit.filter((d) => d.blocks.length);
+    const days = PROG.withWeekdays(planEdit.filter((d) => d.blocks.length));
     if (!days.length) return toast('A plan needs at least one exercise', 'warn');
     await saveDays(days, 'Plan updated');
     planEdit = null;
@@ -2466,6 +2542,12 @@ function wire(root) {
        still works. See the guard above. */
     const ctl = ev.target.closest('[data-change]');
     if (ctl && ACTIONS[ctl.dataset.change]) ACTIONS[ctl.dataset.change](ctl);
+
+    const pd = ev.target.closest('[data-ped-day]');
+    if (pd && planEdit) {
+      const day = planEdit[+pd.dataset.pedDay];
+      if (day) day.weekday = num(pd.value, 1);
+    }
   });
 
   root.addEventListener('click', (ev) => {
@@ -2932,6 +3014,7 @@ function bootDemo() {
   if (wk) weekSheet(wk === 'last' ? pastWeeks()[0] : wk);
 
   if (params.has('partner')) partnerSheet();
+  if (params.has('plan')) ACTIONS['edit-program']();
 
   /* ?demo&bg=forest&accent=teal renders a theme without needing to click, so a
      headless screenshot can prove every screen still uses the tokens. */
@@ -3173,9 +3256,16 @@ function planEditBody() {
 
   return planEdit.map((day, d) => `
     <div class="card tight" style="margin-bottom:12px">
-      <div class="field" style="margin-bottom:10px">
-        <input value="${esc(day.name || `Day ${d + 1}`)}" data-ped="name" data-d="${d}"
-          aria-label="Day name" style="font-weight:700">
+      <div class="field-row" style="margin-bottom:10px">
+        <div class="field" style="flex:2">
+          <input value="${esc(day.name || `Day ${d + 1}`)}" data-ped="name" data-d="${d}"
+            aria-label="Day name" style="font-weight:700">
+        </div>
+        <div class="field" style="flex:1">
+          <select data-ped-day="${d}" aria-label="Day of the week">
+            ${PROG.WEEKDAYS.map((w) => `<option value="${w.id}" ${w.id === day.weekday ? 'selected' : ''}>${esc(w.short)}</option>`).join('')}
+          </select>
+        </div>
       </div>
       ${day.blocks.length ? day.blocks.map((b, i) => {
         const ex = EX.BY_ID[b.exerciseId];
@@ -3200,8 +3290,10 @@ function planEditBody() {
 
 function planEditSheet() {
   openSheet('Edit your plan', `<div id="ped-body">${planEditBody()}</div>
-    <p class="tiny faint">Changes apply from today onwards. Weeks are rebuilt around them,
-    so progression and the deload still line up.</p>`,
+    <p class="tiny faint">Pick the day of the week each session belongs to. Miss one and it
+    slides to the next day rather than disappearing, and the whole plan re-anchors to your
+    real weekdays every Monday. Weeks are rebuilt around any change, so progression and
+    the deload still line up.</p>`,
   `<button class="btn primary wide" data-act="save-plan-edit">Save changes</button>`);
 }
 

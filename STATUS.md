@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **334 / 334 passing**
+- `http://localhost:8777/selftest.html` — **369 / 369 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,7 +57,7 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 334 regression checks | Passing |
+| `selftest.js/.html` | 369 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
@@ -366,6 +366,55 @@ delegation on `[data-change]` (renamed from `data-toggle`, which read wrong on a
 select). The click delegation deliberately ignores native controls since v0.3.5,
 so a select carrying `data-act` would never fire, which is the original lift
 picker bug.
+
+### The schedule knows what day it is (v0.3.8)
+
+**The bug Grant hit.** `todaySession()` picked the day like this:
+
+```js
+const done = weekWorkouts().length;
+const day = week.days[done % week.days.length];
+```
+
+`weekWorkouts()` filters to the current ISO week, so at midnight on Sunday that
+counter dropped to zero and the program snapped back to day one. It was also
+advanced by **any** logged workout, so an ad-hoc session or a core session
+silently skipped a day of the split, and two sessions in one day skipped two.
+The day shown depended on a count, never on the calendar.
+
+**The model now.** Each program day owns a weekday. A day is due once its
+weekday arrives, and days are worked through in order. `PROG.dueDay(days, {
+weekday, completed })` returns what is due or `null` for a rest day, where
+`completed` counts only sessions that came from the program (`plannedDay != null`).
+
+Miss a day and it stays at the front of the queue, so everything after it slides
+forward. The queue is measured against the current week only, so the whole plan
+**re-anchors to real weekdays every Monday** and can never drift more than a
+week. A carried-over session is labelled as such on the card.
+
+A missed day needs no special handling: a day with nothing logged is already a
+rest day to `score.js`, which is what consumes the rest allowance and keeps the
+streak alive.
+
+Weekdays are picked **per day in the plan editor**, next to the name. New plans
+default to a sensible spread: five days is Mon-Fri, three is Mon/Wed/Fri, four
+avoids four in a row.
+
+Plans saved before this existed have no weekdays at all. `dueDay` falls back to
+"everything is due", which reproduces the old rotation rather than declaring
+every day a rest day, and `expandProgram` fills them in on the next save.
+
+**Days are no longer named after weekdays.** `buildTemplate` used to call them
+"Monday", "Tuesday" and so on, which double-encodes the schedule: move one to
+Wednesday and it is still called "Thursday" on screen. They are now named for
+what they train ("Chest and Back", "Legs"), and the weekday picker owns the
+when. The rest-day copy also drops the name when a user-written one already IS
+a weekday, so it never reads "Next up is Friday on Friday".
+
+35 new checks including every case Grant described, plus the ad-hoc session that
+used to skip a day and the two-sessions-in-a-day case.
+
+`?demo&plan` opens the editor for screenshotting.
 
 ### Needs a Worker redeploy
 
