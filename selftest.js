@@ -975,6 +975,88 @@ section('anatomy');
     S.restDaysUsed(['2026-08-23', '2026-08-31'], WEEK, after), 7);
 }
 
+/* ============================== classes as volume ============================== */
+
+{
+  section('classes as volume');
+
+  const cls = (over) => ({ date: '2026-08-24', kind: 'class', classId: 'solidcore',
+    minutes: 50, effort: 'solid', ...over });
+
+  /* Solidcore is typed as core + legs, so a 50 minute class at normal effort is
+     50/10 = 5 notional sets split two ways. */
+  eq('a class splits its work across the groups it hit', T.classSets(cls()), 2.5);
+  eq('effort scales it down', T.classSets(cls({ effort: 'easy' })), 1.5);
+  eq('and up', T.classSets(cls({ effort: 'brutal' })), 3.5);
+  eq('an unknown effort falls back to solid', T.classSets(cls({ effort: 'nonsense' })), 2.5);
+  eq('a longer class is worth more', T.classSets(cls({ minutes: 100 })), 5);
+  eq('hitting one group concentrates it', T.classSets(cls({ groups: ['core'] })), 5);
+
+  /* No class may claim a whole week of one muscle on its own. */
+  eq('the per-group credit is capped',
+    T.classSets(cls({ minutes: 600, groups: ['core'], effort: 'brutal' })), 8);
+
+  eq('a class with no minutes is worth nothing', T.classSets(cls({ minutes: 0 })), 0);
+  eq('a class naming no real group is worth nothing',
+    T.classSets({ kind: 'class', classId: 'nope', minutes: 50, groups: ['nonsense'] }), 0);
+
+  /* Classes logged before the questionnaire shipped carry neither field. They
+     must keep counting, or updating the app would silently erase her history. */
+  const legacy = { date: '2026-08-24', kind: 'class', classId: 'reformer_pilates', minutes: 50 };
+  check('a class logged before the questionnaire still credits its type-s groups',
+    T.classSets(legacy) > 0);
+  eq('using the class type-s own groups', T.classGroups(legacy).join(','), 'core,legs');
+
+  /* Group totals. */
+  const vol = T.classVolumeByGroup([cls(), cls({ date: '2026-08-26' })]);
+  eq('two classes credit the group twice', vol.core.classes, 2);
+  eq('and their sets add up', vol.core.sets, 5);
+  eq('a group the class never touched stays empty', vol.chest.sets, 0);
+  eq('non-class cardio is ignored',
+    T.classVolumeByGroup([{ date: '2026-08-24', exerciseId: 'treadmill_run', minutes: 40 }]).legs.sets, 0);
+
+  /* THE important one: with no classes, the combined view must equal the
+     lifted view exactly. This is what proves the change is invisible to Grant,
+     who never logs a class. */
+  const workouts = [{
+    date: '2026-08-24',
+    entries: [{ exerciseId: 'bench_press', sets: [{ weight: 135, reps: 8 }, { weight: 135, reps: 8 }] }],
+  }];
+  const lifted = T.volumeByGroup(workouts);
+  const combined = T.combinedVolumeByGroup(workouts, []);
+  check('with no classes, combined volume equals lifted volume exactly',
+    Object.keys(lifted).every((g) => combined[g].total === lifted[g]));
+  eq('and every group is still present',
+    Object.keys(combined).length, Object.keys(lifted).length);
+
+  /* And with classes, the two contributions stay separately readable, so a bar
+     can show real sets and estimated ones as different things. */
+  const both = T.combinedVolumeByGroup(workouts, [cls()]);
+  eq('lifted sets stay lifted sets', both.core.sets, lifted.core);
+  eq('class sets are reported apart', both.core.classSets, 2.5);
+  eq('and the total is their sum', both.core.total, Math.round((lifted.core + 2.5) * 10) / 10);
+  eq('a lifted-only group is untouched by classes', both.chest.total, lifted.chest);
+}
+
+/* ============================== class summary ============================== */
+
+{
+  section('class summary');
+
+  const c = (classId, minutes) => ({ date: '2026-08-24', kind: 'class', classId, minutes });
+  const summary = T.classSummary([
+    c('solidcore', 50), c('solidcore', 50), c('reformer_pilates', 55),
+    { date: '2026-08-25', exerciseId: 'treadmill_run', minutes: 30 },
+  ]);
+
+  eq('counts every class', summary.total, 3);
+  eq('and only classes', summary.minutes, 155);
+  eq('most frequent type first', summary.types[0].classId, 'solidcore');
+  eq('with its own count', summary.types[0].count, 2);
+  eq('and its own minutes', summary.types[0].minutes, 100);
+  eq('an empty log summarises to nothing', T.classSummary([]).total, 0);
+}
+
 /* ============================== report ============================== */
 
 export function runAll() {

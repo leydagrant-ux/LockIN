@@ -171,6 +171,13 @@ input[type=range]::-moz-range-thumb { width:24px; height:24px; border-radius:50%
 
 .bar { height:6px; background:var(--surface-2); border-radius:3px; overflow:hidden; }
 .bar i { display:block; height:100%; border-radius:3px; }
+/* Two segments in one bar: measured sets, then the estimate from classes.
+   `.bar i` is display:block, so without this the second segment would stack
+   under the first and be clipped by the overflow rule. */
+.bar.split { display:flex; }
+.bar.split i { border-radius:0; }
+.bar.split i:first-child { border-radius:3px 0 0 3px; }
+.bar.split i:last-child { border-radius:0 3px 3px 0; }
 
 .heat { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7,1fr); gap:3px; }
 .heat i { aspect-ratio:1; border-radius:3px; background:var(--surface-2); }

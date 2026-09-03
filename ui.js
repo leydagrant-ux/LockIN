@@ -354,14 +354,20 @@ function weekScore(weekKey) {
   const planned = num(S.profile?.daysPerWeek, 4);
   const fromPlan = workouts.filter((w) => w.plannedDay != null).length;
 
+  /* A studio class IS training. Ashtin does four a week, and counting them as
+     missed sessions graded her as if she had done nothing. They carry no
+     plannedDay, so they are added on top of whatever the program accounted
+     for. The clamp in scoreWeek keeps the total honest. */
+  const classes = cardio.filter((c) => c.kind === 'class').length;
+
   /* The streak as it stood when that week closed, not today's. */
   const now = new Date();
   const asOf = end < now ? end : now;
 
   return SCORE.scoreWeek({
     plannedSessions: planned,
-    completedSessions: Math.min(fromPlan || workouts.length, planned),
-    totalSessions: workouts.length,
+    completedSessions: Math.min((fromPlan || workouts.length) + classes, planned),
+    totalSessions: workouts.length + classes,
     nutritionDaysOnTarget: days.filter((d) => d.onTarget).length,
     cardioMinutes: cardio.reduce((s, c) => s + num(c.minutes), 0),
     streak: myStreak(asOf).days,
@@ -811,7 +817,13 @@ function recentCard() {
 
 function bodyView() {
   const week = weekWorkouts();
-  const vol = STATS.volumeByGroup(week);
+  const { start } = SCORE.weekRange(thisWeek());
+  const weekCardio = S.cardio.filter((c) => c.date >= SCORE.dayKey(start));
+
+  /* Classes light up the figure too, or a week of Solidcore reads as a body
+     that was never trained. */
+  const combined = STATS.combinedVolumeByGroup(week, weekCardio);
+  const vol = Object.fromEntries(Object.entries(combined).map(([g, v]) => [g, v.total]));
   const sex = S.profile?.sex === 'female' ? 'female' : 'male';
 
   /* Progress toward each group's weekly target, capped at 1. */
@@ -973,11 +985,6 @@ function statsView() {
   const weeks = STATS.weeklyVolume(S.workouts);
   const cells = STATS.heatmapGrid(S.workouts, S.cardio, new Date(), 18);
 
-  const lifts = [...new Set(S.workouts.flatMap((w) => (w.entries || []).map((e) => e.exerciseId)))]
-    .filter((id) => EX.BY_ID[id]);
-  const pick = S.statLift && lifts.includes(S.statLift) ? S.statLift : lifts[0];
-  const series = pick ? STATS.e1rmSeries(S.workouts, pick) : [];
-
   return `<div class="screen">
     <div class="top"><div><h1>Stats</h1><div class="sub">${esc(week)} · ${esc(SCORE.weekSummary(board))}</div></div></div>
 
@@ -1025,17 +1032,11 @@ function statsView() {
       ${volumeChart(weeks)}
     </div>
 
-    ${lifts.length ? `<div class="card">
-      <div class="card-title">Estimated 1RM</div>
-      <div class="field">
-        <select data-act="pick-lift">
-          ${lifts.map((id) => `<option value="${esc(id)}" ${id === pick ? 'selected' : ''}>${esc(EX.BY_ID[id].name)}</option>`).join('')}
-        </select>
-      </div>
-      ${series.length ? `<div class="stat">${round(series[series.length - 1].e1rm, 1)} <small>lb estimated max</small></div>` : ''}
-      ${lineChart(series.map((p) => ({ date: p.date, value: p.e1rm })),
-        { color: GROUP_COLOR.chest, label: 'Estimated one rep max' })}
-    </div>` : ''}
+    ${volumeTargetCard()}
+
+    ${prBoardCard()}
+
+    ${classSummaryCard()}
 
     <div class="card">
       <div class="card-title">Consistency <span class="faint">· last 18 weeks</span></div>
@@ -1815,8 +1816,6 @@ const ACTIONS = {
     else confirmMealSheet(result);
   }, 'Could not work out the macros'),
 
-  'pick-lift': (el) => { S.statLift = el.value; render(); },
-
   'export': () => guard(async () => {
     const data = await DB.exportAll();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -2331,6 +2330,10 @@ function setEquipment(list) {
 
 /* ============================== event wiring ============================== */
 
+/* Chip rows where more than one answer is legitimate. Anything not listed here
+   behaves as a radio group and writes to a hidden input. */
+const MULTI_CHIP_GROUPS = new Set(['sore', 'classgroups']);
+
 let wired = false;
 
 /**
@@ -2364,7 +2367,7 @@ function wire(root) {
     const groupChip = ev.target.closest('[data-group] [data-val]');
     if (groupChip) {
       const group = groupChip.closest('[data-group]').dataset.group;
-      if (group === 'sore') {
+      if (MULTI_CHIP_GROUPS.has(group)) {
         groupChip.setAttribute('aria-pressed', groupChip.getAttribute('aria-pressed') !== 'true');
       } else {
         [...groupChip.parentElement.children].forEach((c) => c.setAttribute('aria-pressed', 'false'));
@@ -2374,6 +2377,14 @@ function wire(root) {
       }
       return;
     }
+
+    /* Never swallow a click on a native control. preventDefault() below stops
+       a <select> from opening its picker at all, which is exactly how the lift
+       chooser came to do nothing: it carried a data-act, so the delegation
+       claimed the click and the change event never happened. Anything that
+       needs native behaviour is left alone; its own change/input listener
+       handles it. */
+    if (ev.target.closest('select, input, textarea, option')) return;
 
     const act = ev.target.closest('[data-act]');
     if (act && ACTIONS[act.dataset.act]) {
@@ -2385,11 +2396,6 @@ function wire(root) {
       ev.preventDefault();
       ACTIONS[act.dataset.act](act);
     }
-  });
-
-  root.addEventListener('change', (ev) => {
-    const sel = ev.target.closest('[data-act="pick-lift"]');
-    if (sel) { S.statLift = sel.value; render(); }
   });
 
   root.addEventListener('click', (ev) => {
@@ -2579,11 +2585,16 @@ const FORMS = {
     toast('Cardio logged', 'ok');
   },
 
-  'class-form': async (d) => {
+  'class-form': async (d, form) => {
+    const groups = [...form.querySelectorAll('[data-group="classgroups"] [aria-pressed="true"]')]
+      .map((b) => b.dataset.val);
+
     const c = {
       date: todayKey(), kind: 'class', classId: d.classId,
       name: EX.CLASS_BY_ID[d.classId]?.label || 'Class',
       minutes: num(d.minutes),
+      groups,
+      effort: STATS.CLASS_EFFORT[d.effort] ? d.effort : STATS.DEFAULT_EFFORT,
       studio: (d.studio || '').trim() || null,
       note: (d.note || '').trim() || null,
     };
@@ -2591,7 +2602,10 @@ const FORMS = {
     S.cardio = [{ id, ...c }, ...S.cardio];
     await publishScore();
     closeSheet();
-    toast(`${c.name} logged`, 'ok');
+
+    /* Say what it was worth, so the estimate is never invisible. */
+    const sets = STATS.classSets(c);
+    toast(sets ? `${c.name} logged. About ${sets} sets per muscle.` : `${c.name} logged`, 'ok');
   },
 
   'machine-form': async (d, form) => {
@@ -2752,7 +2766,15 @@ function demoData() {
 
   return {
     workouts, metrics, meals,
-    cardio: [{ id: 'c1', date: day(1), exerciseId: 'incline_walk', minutes: 32 }],
+    cardio: [
+      { id: 'c1', date: day(1), exerciseId: 'incline_walk', minutes: 32 },
+      /* Classes are in the demo on purpose: they are the only path that turns
+         cardio into muscle volume, and without one it cannot be eyeballed. */
+      { id: 'c2', date: day(2), kind: 'class', classId: 'solidcore', minutes: 50,
+        effort: 'brutal', groups: ['core', 'legs'], studio: 'Solidcore Fort Worth' },
+      { id: 'c3', date: day(5), kind: 'class', classId: 'reformer_pilates', minutes: 55,
+        effort: 'solid', groups: ['core', 'glutes'] },
+    ],
     checkins: [{ id: 'k1', date: day(0), sleep: 4, energy: 4, soreness: 2, stress: 2, soreGroups: [] }],
     photos: [], foods: [
       { id: 'f1', name: 'Chipotle chicken bowl', calories: 815, protein: 54, carbs: 82, fat: 27, per: 'bowl', uses: 6 },
@@ -3198,9 +3220,19 @@ function cardioFinishSheet(minutes, exerciseId) {
     </form>`);
 }
 
+/*
+ * Logging a class asks two extra questions, and they are the whole reason a
+ * class counts for anything: which muscles it worked, and how hard it was.
+ *
+ * Both are pre-answered from the class type so the common case is still one
+ * tap on Log it. The effort call is hers rather than the app's, which is what
+ * makes the set estimate defensible at all.
+ */
 function classSheet(classId) {
   const cls = EX.CLASS_BY_ID[classId];
   if (!cls) return;
+  const preset = new Set(cls.groups || []);
+
   openSheet(cls.label, `
     <form id="class-form">
       <input type="hidden" name="classId" value="${esc(classId)}">
@@ -3210,8 +3242,26 @@ function classSheet(classId) {
         <div class="field"><label for="cl-studio">Studio <span class="faint">(optional)</span></label>
           <input id="cl-studio" name="studio" autocomplete="off" placeholder="Solidcore Fort Worth"></div>
       </div>
-      <div class="field"><label for="cl-note">How was it? <span class="faint">(optional)</span></label>
-        <input id="cl-note" name="note" autocomplete="off" placeholder="Legs and core, brutal"></div>
+
+      <div class="field">
+        <label>What did it work? <span class="faint">(this is what makes it count)</span></label>
+        <div class="chips" data-group="classgroups">
+          ${Object.entries(EX.GROUP_LABELS).map(([k, l]) =>
+            `<button type="button" class="chip sm" data-val="${k}" aria-pressed="${preset.has(k)}">${esc(l)}</button>`).join('')}
+        </div>
+      </div>
+
+      <div class="field">
+        <label>How hard?</label>
+        <div class="chips" data-group="effort">
+          ${Object.keys(STATS.CLASS_EFFORT).map((k) =>
+            `<button type="button" class="chip sm" data-val="${k}" aria-pressed="${k === STATS.DEFAULT_EFFORT}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}
+        </div>
+        <input type="hidden" name="effort" value="${esc(STATS.DEFAULT_EFFORT)}">
+      </div>
+
+      <div class="field"><label for="cl-note">Anything to remember? <span class="faint">(optional)</span></label>
+        <input id="cl-note" name="note" autocomplete="off" placeholder="New instructor, hardest one yet"></div>
       <button class="btn primary wide" type="submit">Log it</button>
     </form>`);
 }
@@ -3411,6 +3461,149 @@ function weekReviewBlock(weekKey) {
 }
 
 const weekSheet = (weekKey) => openSheet(`Week of ${weekLabel(weekKey)}`, weekSheetBody(weekKey));
+
+
+/* ============================== volume against targets ============================== */
+
+/*
+ * The one question a hypertrophy programme actually turns on: are you doing
+ * enough for each muscle?
+ *
+ * PROG.VOLUME_LANDMARKS has held MEV / MAV / MRV since the first build and was
+ * only ever used to check a GENERATED plan. It was never shown against what was
+ * really trained, which is the comparison that matters.
+ *
+ * Four weeks, not one. A single light week is noise, and reading it as failure
+ * would make the card cry wolf. It also keeps this distinct from the Body tab,
+ * which maps the current week anatomically.
+ */
+const VOLUME_WINDOW_WEEKS = 4;
+
+function volumeTargetCard() {
+  const cutoff = SCORE.dayKey(new Date(Date.now() - VOLUME_WINDOW_WEEKS * 7 * 86400000));
+  const workouts = S.workouts.filter((w) => w.date >= cutoff);
+  const cardio = S.cardio.filter((c) => c.date >= cutoff);
+  const vol = STATS.combinedVolumeByGroup(workouts, cardio);
+
+  if (!workouts.length && !cardio.some((c) => c.kind === 'class')) return '';
+
+  const rows = Object.keys(PROG.VOLUME_LANDMARKS).map((group) => {
+    const mark = PROG.VOLUME_LANDMARKS[group];
+    const v = vol[group] || { sets: 0, classSets: 0, classes: 0, total: 0 };
+    const perWeek = round(v.total / VOLUME_WINDOW_WEEKS, 1);
+    const liftedPerWeek = round(v.sets / VOLUME_WINDOW_WEEKS, 1);
+    const classPerWeek = round(v.classSets / VOLUME_WINDOW_WEEKS, 1);
+
+    const verdict = perWeek === 0 ? 'nothing logged'
+      : perWeek < mark.mev ? `under the ${mark.mev} set minimum`
+        : perWeek < mark.mav ? 'enough to grow'
+          : perWeek <= mark.mrv ? 'growing well'
+            : 'more than you can recover from';
+
+    const colour = perWeek === 0 || perWeek < mark.mev ? 'var(--warn)'
+      : perWeek > mark.mrv ? 'var(--bad)' : 'var(--good)';
+
+    /* Scaled against MRV so every group shares one axis and the bars are
+       comparable to each other, not just to their own target. */
+    const pct = (n) => Math.min(100, (n / mark.mrv) * 100);
+
+    return `<div class="list-row">
+      <div class="grow">
+        <div style="display:flex;justify-content:space-between">
+          <b>${esc(EX.GROUP_LABELS[group] || group)}</b>
+          <span class="tiny muted">${perWeek} ${perWeek === 1 ? 'set' : 'sets'} a week</span>
+        </div>
+        <div class="bar split" style="margin:6px 0 4px">
+          <i style="width:${pct(liftedPerWeek)}%;background:${colour}"></i>
+          ${classPerWeek > 0 ? `<i style="width:${pct(classPerWeek)}%;background:${colour};opacity:.45"></i>` : ''}
+        </div>
+        <div class="tiny faint">${esc(verdict)}${
+          classPerWeek > 0 ? ` &middot; about ${classPerWeek} from classes` : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `<div class="card">
+    <div class="card-title">Are you training enough? <span class="faint">· 4 week average</span></div>
+    ${rows}
+    <p class="tiny faint" style="margin-bottom:0">Targets are the usual weekly set ranges per muscle.
+    The faded part of a bar is an estimate from classes, not counted sets.</p>
+  </div>`;
+}
+
+/* ============================== personal records ============================== */
+
+/*
+ * STATS.personalRecords has been written and tested since the first build and
+ * had never been called. A PR fired a celebration sheet and then vanished;
+ * there was nowhere to see what your bests actually are.
+ */
+function prBoardCard(limit = 10) {
+  const lifts = [...new Set(S.workouts.flatMap((w) => (w.entries || []).map((e) => e.exerciseId)))]
+    .filter((id) => EX.BY_ID[id]);
+
+  const rows = lifts
+    .map((id) => ({ id, name: EX.BY_ID[id].name, bw: EX.BY_ID[id].bw, ...STATS.personalRecords(S.workouts, id) }))
+    .filter((r) => r.heaviest)
+    .sort((a, b) => String(b.bestE1rm?.date || '').localeCompare(String(a.bestE1rm?.date || '')))
+    .slice(0, limit);
+
+  if (!rows.length) return '';
+
+  return `<div class="card">
+    <div class="card-title">Personal records</div>
+    ${rows.map((r) => {
+      /* A bodyweight lift logs 0 lb, so its "heaviest" is meaningless and the
+         real record is the rep count. */
+      const loaded = num(r.heaviest.weight) > 0;
+      const headline = loaded
+        ? `${round(r.heaviest.weight, 1)} lb × ${r.heaviest.reps}`
+        : `${r.mostReps.reps} reps`;
+      const sub = loaded
+        ? `${round(r.bestE1rm.e1rm, 1)} lb estimated max · ${esc(r.bestE1rm.date)}`
+        : `bodyweight · ${esc(r.mostReps.date)}`;
+
+      return `<div class="list-row">
+        <div class="grow">
+          <b class="ellip">${esc(r.name)}</b>
+          <span class="tiny muted">${esc(sub)}</span>
+        </div>
+        <b class="tiny">${esc(headline)}</b>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+/* ============================== classes ============================== */
+
+const CLASS_WINDOW_WEEKS = 8;
+
+function classSummaryCard() {
+  const cutoff = SCORE.dayKey(new Date(Date.now() - CLASS_WINDOW_WEEKS * 7 * 86400000));
+  const classes = S.cardio.filter((c) => c.kind === 'class' && c.date >= cutoff);
+  if (!classes.length) return '';
+
+  const sum = STATS.classSummary(classes);
+  const vol = STATS.classVolumeByGroup(classes);
+  const hit = Object.entries(vol).filter(([, v]) => v.classes > 0)
+    .sort((a, b) => b[1].sets - a[1].sets);
+  const most = sum.types[0]?.count || 1;
+
+  return `<div class="card">
+    <div class="card-title">Classes <span class="faint">· last ${CLASS_WINDOW_WEEKS} weeks</span></div>
+    <div class="row" style="gap:18px;margin-bottom:14px">
+      <div><div class="stat">${sum.total}</div><div class="tiny faint">classes</div></div>
+      <div><div class="stat">${Math.round(sum.minutes / 60)}</div><div class="tiny faint">hours</div></div>
+    </div>
+    ${sum.types.map((t) => `<div class="list-row" style="border:0;padding:4px 0">
+      <span class="tiny" style="width:104px">${esc(EX.CLASS_BY_ID[t.classId]?.label || t.classId)}</span>
+      <div class="bar grow"><i style="width:${(t.count / most) * 100}%;background:var(--accent-dim)"></i></div>
+      <span class="tiny faint" style="width:22px;text-align:right">${t.count}</span>
+    </div>`).join('')}
+    ${hit.length ? `<p class="tiny faint" style="margin-bottom:0">Mostly working
+      ${esc(hit.slice(0, 3).map(([g]) => (EX.GROUP_LABELS[g] || g).toLowerCase()).join(', '))}.</p>` : ''}
+  </div>`;
+}
 
 /* ============================== boot ============================== */
 

@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **289 / 289 passing**
+- `http://localhost:8777/selftest.html` — **316 / 316 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,7 +57,7 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 289 regression checks | Passing |
+| `selftest.js/.html` | 316 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
@@ -216,6 +216,64 @@ that `allowance: 0` reduces exactly to `currentStreak()`.
 
 `?demo&week=last` opens a past week for screenshotting, for the same reason
 `?demo&logger` exists.
+
+### Classes count, and the 1RM card is gone (v0.3.5)
+
+**The lift picker never worked, and the cause is worth remembering.** `pick-lift`
+was registered twice: once in the `ACTIONS` map and once as a `change` listener.
+The click delegation matches any `[data-act]` present in `ACTIONS` and calls
+`ev.preventDefault()`, which on a `<select>` stops the native picker opening at
+all, so the change event could never fire. Tapping it silently re-rendered.
+
+The durable fix is the delegation guard, not the deletion:
+
+```js
+if (ev.target.closest('select, input, textarea, option')) return;
+```
+
+Never swallow a click on a native control. Any future `<select data-act=…>`
+would have hit exactly this.
+
+**Estimated 1RM is replaced by two cards**, both of which reuse code that was
+written, tested, and never called:
+
+- **Are you training enough?** — `PROG.VOLUME_LANDMARKS` has held MEV/MAV/MRV
+  since the first build and only ever checked a *generated* plan. It now runs
+  against what was actually trained, averaged over 4 weeks so one light week is
+  not read as failure, and it says the useful thing: `Chest · 4.5 sets a week ·
+  under the 8 set minimum`.
+- **Personal records** — `STATS.personalRecords()` had never been called. PRs
+  fired a celebration and then vanished with nowhere to see them.
+
+e1RM is not lost: it is in every session review and inside `personalRecords`.
+
+### Ashtin's classes are training now
+
+Solidcore and reformer work logged as cardio minutes and nothing else. It lit up
+no muscle, counted for no volume, and read as a **missed session** against her
+plan. She trains four times a week and the app graded her as if she had not.
+
+- Logging a class asks **which muscle groups it hit** (pre-ticked from the class
+  type, so the common case is still one tap) and **how hard it was**.
+- `STATS.classSets()` converts duration and effort into approximate sets, capped
+  at 8 per group. **This is a rule of thumb, not a research claim.** It is
+  deliberately conservative, the effort call is hers rather than the app's, and
+  the number is shown openly, in the toast when she logs and as "about 2.3 from
+  classes" on the bar. Do not let it quietly become a measurement.
+- The volume bar shows lifted sets solid and class sets faded, so the estimate
+  is always visually distinct from counted work.
+- Classes credit the body map and **count toward plan adherence**. In the demo
+  this moved the week from 3-of-4 planned to 4-of-4, and the score from 49 to 64.
+- Classes logged before the questionnaire existed have no `groups` or `effort`
+  and fall back to the class type's own groups and `solid`, so the update does
+  not silently erase her history. That fallback is a selftest case.
+
+27 new selftest checks. The one that matters most asserts
+`combinedVolumeByGroup` equals `volumeByGroup` exactly when no classes exist,
+which is what proves none of this changed anything for Grant.
+
+The demo data now contains two classes, because that path cannot be eyeballed
+without one.
 
 ### Needs a Worker redeploy
 

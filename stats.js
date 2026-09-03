@@ -11,7 +11,7 @@
  *   { id, date: 'YYYY-MM-DD', entries: [ { exerciseId, sets: [ { weight, reps, rir, done } ] } ] }
  */
 
-import { BY_ID, MUSCLE_GROUPS, groupOf } from './exercises.js';
+import { BY_ID, MUSCLE_GROUPS, groupOf, CLASS_BY_ID } from './exercises.js';
 import { epley, GOALS } from './program.js';
 import { isoWeekKey, dayKey } from './score.js';
 
@@ -277,6 +277,129 @@ export function heatmapGrid(workouts, cardio, end = new Date(), weeks = 26) {
     cells.push({ date: key, level: map.get(key) || 0 });
   }
   return cells;
+}
+
+/* ============================== studio classes ============================== */
+
+/*
+ * Turning a class into muscle volume.
+ *
+ * Ashtin trains four times a week at Solidcore and on a reformer. That work
+ * logged as cardio minutes and nothing else, so it lit up no muscle on the body
+ * map, counted for no volume, and read as a MISSED session against her plan.
+ * The app graded her as if she had not trained.
+ *
+ * A class is not sets and reps, so any number here is an estimate. This one is
+ * deliberately conservative and deliberately visible: the effort call is hers,
+ * not the app's, and the result is shown in the UI as "about 3 sets" so it can
+ * never pass for something it measured. Do not let anyone later mistake this
+ * for a research-backed conversion. It is a reasonable rule of thumb, no more.
+ */
+export const CLASS_EFFORT = { easy: 0.6, solid: 1.0, brutal: 1.4 };
+
+export const DEFAULT_EFFORT = 'solid';
+
+/* Ten minutes of class work per notional set, before effort. A hard hour is
+   worth roughly what an hour of lifting is, and it is split across the groups
+   the class actually hit rather than credited to each in full. */
+const MINUTES_PER_SET = 10;
+
+/* No single class may claim more than a heavy session's worth of one muscle. */
+const MAX_SETS_PER_GROUP = 8;
+
+/** The muscle groups a class entry hit, falling back to the class type. */
+export function classGroups(entry) {
+  const picked = (entry?.groups || []).filter((g) => MUSCLE_GROUPS[g]);
+  if (picked.length) return picked;
+  /* Entries logged before the questionnaire existed carry neither field. Using
+     the class type's own groups keeps that history meaningful instead of
+     silently scoring it as zero. */
+  return (CLASS_BY_ID[entry?.classId]?.groups || []).filter((g) => MUSCLE_GROUPS[g]);
+}
+
+/**
+ * Approximate sets credited to EACH group this class hit.
+ *
+ * @returns {number} 0 when the entry names no groups at all
+ */
+export function classSets(entry) {
+  const groups = classGroups(entry);
+  if (!groups.length) return 0;
+
+  const minutes = Math.max(0, Number(entry?.minutes) || 0);
+  const effort = CLASS_EFFORT[entry?.effort] ?? CLASS_EFFORT[DEFAULT_EFFORT];
+  const perGroup = (minutes / MINUTES_PER_SET) * effort / groups.length;
+
+  return Math.min(MAX_SETS_PER_GROUP, Math.round(perGroup * 10) / 10);
+}
+
+/** Class contribution per muscle group, and how many classes fed it. */
+export function classVolumeByGroup(cardio) {
+  const totals = Object.fromEntries(
+    Object.keys(MUSCLE_GROUPS).map((g) => [g, { classes: 0, sets: 0 }]));
+
+  for (const c of cardio || []) {
+    if (c?.kind !== 'class') continue;
+    const sets = classSets(c);
+    if (!sets) continue;
+    for (const g of classGroups(c)) {
+      totals[g].classes += 1;
+      totals[g].sets += sets;
+    }
+  }
+
+  for (const g of Object.keys(totals)) {
+    totals[g].sets = Math.round(totals[g].sets * 10) / 10;
+  }
+  return totals;
+}
+
+/**
+ * Lifted sets and class sets per group, kept separate as well as summed.
+ *
+ * The split matters downstream: a bar can show the real training and the
+ * estimated class contribution as different things, which is what stops the
+ * estimate above from quietly becoming a measurement.
+ *
+ * With no classes logged, every `total` equals what volumeByGroup() alone
+ * returns — asserted in the selftest, because that is what proves this changed
+ * nothing for anyone who only lifts.
+ */
+export function combinedVolumeByGroup(workouts, cardio) {
+  const lifted = volumeByGroup(workouts);
+  const fromClasses = classVolumeByGroup(cardio);
+
+  return Object.fromEntries(Object.keys(MUSCLE_GROUPS).map((g) => {
+    const sets = lifted[g] || 0;
+    const classSetCount = fromClasses[g]?.sets || 0;
+    return [g, {
+      sets,
+      classSets: classSetCount,
+      classes: fromClasses[g]?.classes || 0,
+      total: Math.round((sets + classSetCount) * 10) / 10,
+    }];
+  }));
+}
+
+/** Classes grouped by type, most frequent first. Feeds the summary card. */
+export function classSummary(cardio) {
+  const byType = new Map();
+  let minutes = 0;
+
+  for (const c of cardio || []) {
+    if (c?.kind !== 'class') continue;
+    const row = byType.get(c.classId) || { classId: c.classId, count: 0, minutes: 0 };
+    row.count += 1;
+    row.minutes += Math.max(0, Number(c.minutes) || 0);
+    byType.set(c.classId, row);
+    minutes += Math.max(0, Number(c.minutes) || 0);
+  }
+
+  return {
+    total: [...byType.values()].reduce((n, r) => n + r.count, 0),
+    minutes,
+    types: [...byType.values()].sort((a, b) => b.count - a.count || b.minutes - a.minutes),
+  };
 }
 
 /* ============================== nutrition ============================== */
