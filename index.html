@@ -269,9 +269,37 @@ hr.sep { border:0; border-top:1px solid var(--line-soft); margin:14px 0; }
 /* Registered from the page rather than ui.js so a module-load failure still
    leaves a working service worker, and vice versa. The relative path matters:
    this deploys to a project page at /LockIN/, not a domain root. */
+/*
+ * Registering once and never asking again is why a deploy could sit unseen on a
+ * phone for days: an installed PWA keeps its page alive, so it goes on running
+ * the JavaScript it started with no matter what is on the server. "Delete it
+ * and add it again" was the workaround; this is the fix.
+ *
+ * So: ask for an update on launch AND every time the app comes back to the
+ * foreground, and when a new worker actually takes over, reload. The reload is
+ * handed to the app when the app is listening, because interrupting someone
+ * mid-set to apply an update is its own kind of broken.
+ */
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => { /* fine offline */ });
+  window.addEventListener('load', async () => {
+    let reg;
+    try {
+      reg = await navigator.serviceWorker.register('./sw.js');
+    } catch { return; /* fine offline */ }
+
+    const checkForUpdate = () => { try { reg.update(); } catch { /* offline */ } };
+    checkForUpdate();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkForUpdate();
+    });
+
+    let handled = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (handled) return;
+      handled = true;
+      if (window.__lockinUpdateReady) window.__lockinUpdateReady();
+      else window.location.reload();
+    });
   });
 }
 </script>

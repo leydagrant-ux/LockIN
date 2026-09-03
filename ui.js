@@ -62,6 +62,8 @@ const S = {
   bodyView: 'front',
   sheet: null,
   busy: false,
+  swVersion: '',
+  updateReady: false,
 };
 
 const todayKey = () => SCORE.dayKey(new Date());
@@ -631,6 +633,11 @@ function todayView() {
         <div class="sub">${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}${streak}</div>
       </div>
     </div>
+
+    ${S.updateReady ? `<div class="banner ok" style="display:flex;align-items:center;gap:12px">
+      <span class="grow">An update is ready. It will not apply until you reload.</span>
+      <button class="btn sm" data-act="apply-update">Reload</button>
+    </div>` : ''}
 
     ${S.session && !S.session.paused ? loggerCard() : ''}
 
@@ -1273,6 +1280,9 @@ function moreView() {
         <button class="btn sm ghost" data-act="copy-uid">Copy</button></div>
       <p class="tiny faint">Paste this into <b>config.js</b>, <b>firestore.rules</b> and
       <b>wrangler.toml</b> to finish setup.</p>
+      <div class="list-row"><div class="grow"><b>Version</b>
+        <span class="tiny faint">${esc(S.swVersion || 'checking…')}</span></div>
+        <button class="btn sm ghost" data-act="check-update">Check for update</button></div>
       <hr class="sep">
       <div class="btn-row">
         <button class="btn sm" data-act="export">Export data</button>
@@ -1611,6 +1621,17 @@ const ACTIONS = {
   },
 
   'signout': async () => { await DB.signOut(); location.reload(); },
+
+  'apply-update': () => window.location.reload(),
+
+  'check-update': () => guard(async () => {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (!reg) return toast('No service worker registered', 'warn');
+    await reg.update();
+    /* A new worker takes over on its own and controllerchange fires; nothing
+       new means nothing happens, so say so rather than leaving it silent. */
+    setTimeout(() => { if (!S.updateReady) toast('You are on the latest version', 'ok'); }, 1200);
+  }, 'Could not check for an update'),
 
   'start-session': () => {
     const sess = todaySession();
@@ -4067,6 +4088,43 @@ function partnerBody() {
     documents are not here, and cannot be: the database refuses to hand them over.</p>`;
 }
 
+/* ============================== staying current ============================== */
+
+/*
+ * index.html registers the worker and asks it for updates. This side decides
+ * what to DO when one lands, and shows which version is running.
+ *
+ * A reload mid-workout is safe on paper, because the session is stashed in
+ * localStorage and restored, but yanking the screen away from someone holding a
+ * bar is not something to do for a version number. So a live session downgrades
+ * the update to a banner they can tap when they are done.
+ */
+function watchForUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+
+  window.__lockinUpdateReady = () => {
+    if (S.session && !S.session.paused) {
+      S.updateReady = true;
+      render();
+      return;
+    }
+    window.location.reload();
+  };
+
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (ev.data?.swVersion && ev.data.swVersion !== S.swVersion) {
+      S.swVersion = ev.data.swVersion;
+      render();
+    }
+  });
+
+  const ask = () => navigator.serviceWorker.controller?.postMessage('version');
+  ask();
+  /* The controller is null on the very first load, before the worker has taken
+     over, so ask again once it has. */
+  navigator.serviceWorker.ready.then(ask).catch(() => {});
+}
+
 /* ============================== boot ============================== */
 
 async function loadAll() {
@@ -4093,6 +4151,7 @@ async function boot() {
   /* Before anything renders, so a cold start never flashes the wrong colours. */
   applyStoredTheme();
   wire($('#app'));
+  watchForUpdates();
 
   if (new URLSearchParams(location.search).has('demo')) return bootDemo();
 

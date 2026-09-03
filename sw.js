@@ -10,7 +10,7 @@
  * it is really there.
  */
 
-const VERSION = 'v0.3.9';
+const VERSION = 'v0.3.10';
 const CACHE = `lockin-${VERSION}`;
 
 const SHELL = [
@@ -48,6 +48,13 @@ self.addEventListener('activate', (event) => {
     await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
+});
+
+/* The page asks what version is actually running. Reporting it from here keeps
+   ONE source of truth: a copy of the number in ui.js would drift the first time
+   only one of the two got bumped. */
+self.addEventListener('message', (event) => {
+  if (event.data === 'version') event.source?.postMessage({ swVersion: VERSION });
 });
 
 self.addEventListener('fetch', (event) => {

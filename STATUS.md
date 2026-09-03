@@ -446,6 +446,43 @@ a template literal and truncated the file into an unterminated string. The
 module import check caught it immediately. Match on the whole function text or
 use the editor, never on a brace.
 
+### The app updates itself now (v0.3.10)
+
+Grant reported the rest-day card again after v0.3.9 shipped the fix. The fix was
+correct and correctly deployed; **he was still running the old JavaScript.**
+
+`index.html` registered the service worker on load and then never asked again.
+An installed PWA keeps its page alive for days, so it goes on running whatever
+it started with regardless of what is on the server. Every release note in this
+file saying "remove it from the Home Screen and re-add it" was papering over
+that. Nine times.
+
+What changed:
+
+- **`reg.update()` on launch and on every return to the foreground.** A phone
+  that has been in a pocket checks the moment it is unlocked.
+- **`controllerchange` reloads the page**, so a new worker taking over actually
+  reaches the screen instead of waiting for a cold start.
+- **A live workout is never interrupted.** The reload is handed to `ui.js`, which
+  downgrades it to a banner with a Reload button when a session is in progress.
+  The session survives either way, since it is stashed in localStorage, but
+  yanking the screen away from someone holding a bar for a version number is its
+  own kind of broken.
+- **The running version is shown in More -> Account**, with a Check for update
+  button. No more guessing which build a phone is on.
+
+The version is **reported by the service worker over `postMessage`** rather than
+duplicated into `ui.js`, because a second copy of the number drifts the first
+time only one gets bumped.
+
+Verified by deploying a fake newer worker to the local server while a page was
+open: the page detected it, reloaded itself and came back reporting the new
+version. Repeated with a workout in progress: no reload, banner shown, typed
+weight still 185 afterwards.
+
+**This is the fix for a recurring instruction, not a feature.** Future releases
+should reach both phones without either of them being reinstalled.
+
 ### Needs a Worker redeploy
 
 `worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,
