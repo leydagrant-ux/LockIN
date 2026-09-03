@@ -317,6 +317,56 @@ what proves this is invisible to Ashtin.
 handler now deliberately ignores native controls (see v0.3.5), so a checkbox
 carrying `data-act` would never have fired.
 
+### Her profile, and app colours (v0.3.7)
+
+**Tap Ashtin on the Stats leaderboard** to open everything she has logged: her
+week's score and streak, muscle groups trained, every session (each opening
+read-only, with no delete or grade button on someone else's training), cardio
+and classes, plus any photo or document she chose to share.
+
+`DB.listEntries` already took an owner id, and `listSharedPhotos` /
+`listSharedHealthDocs` had been written and **never called** since the first
+build. This was mostly wiring.
+
+**The privacy split is enforced by `firestore.rules`, not by this code.** Photos
+come back only where `private == false` and documents only where
+`shared == true`, and `db.js` queries exactly the shapes those rules accept.
+The screen cannot show a private photo even if it asked for one. Remember the
+standing gotcha: rules cannot filter a list query, so changing either the query
+or the rule without the other breaks it with a confusing permissions error.
+
+Her data loads **on demand** when the sheet opens, not at boot. Fetching a second
+person's whole history on every launch would slow the start for nothing.
+
+### Themes
+
+**More -> Appearance**: five backgrounds and seven accents, per account.
+
+`themes.css` is **generated** by `gen_theme.py` in the scratchpad, and generated
+for two reasons that matter:
+
+1. Each background's `--surface`, `--surface-2` and `--line` are the original
+   palette's *exact* depth deltas re-applied to the new base, so cards, borders
+   and layering look identical in every theme rather than being re-eyeballed.
+2. `--on-accent` is measured, not chosen. White text lands at **2.15 on amber,
+   2.28 on green and 2.49 on teal**, which is unreadable, so those get near-black
+   ink instead. Crimson, blue, violet and pink keep white, which preserves the
+   look the app already had. `.btn.primary`, pressed chips and `.pill.new` all
+   read `var(--on-accent)` rather than assuming `#fff`.
+
+The choice is saved on the profile so it follows the account, and **mirrored to
+localStorage** so it applies before Firebase answers. Without the mirror every
+cold start flashes the default theme, which looks like a bug.
+
+`?demo&partner` opens her sheet and `?demo&bg=forest&accent=teal` renders a
+theme, both so headless screenshots can prove the screens still use the tokens.
+
+**Wiring note:** the theme controls are `<select>`s, so they use the `change`
+delegation on `[data-change]` (renamed from `data-toggle`, which read wrong on a
+select). The click delegation deliberately ignores native controls since v0.3.5,
+so a select carrying `data-act` would never fire, which is the original lift
+picker bug.
+
 ### Needs a Worker redeploy
 
 `worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,

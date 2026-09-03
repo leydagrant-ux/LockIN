@@ -996,13 +996,15 @@ function statsView() {
 
     <div class="card">
       <div class="card-title">This week</div>
-      ${board.map((e) => `<div style="margin-bottom:14px">
+      ${board.map((e) => `<div style="margin-bottom:14px"
+          ${e.me ? '' : `data-act="view-partner" role="button" tabindex="0"`}>
         <div style="display:flex;justify-content:space-between;align-items:baseline">
-          <b>${esc(e.name)}${e.leader ? ' 👑' : ''}</b>
+          <b>${esc(e.name)}${e.leader ? ' 👑' : ''}${e.me ? '' : ' <span class="faint" aria-hidden="true">›</span>'}</b>
           <span class="stat" style="font-size:22px">${e.score.total}<small>/100</small></span>
         </div>
         <div class="bar" style="margin:6px 0"><i style="width:${e.score.total}%;background:${e.me ? 'var(--accent)' : GROUP_COLOR.shoulders}"></i></div>
       </div>`).join('')}
+      ${theirs ? `<p class="tiny faint" style="margin:-4px 0 0">Tap ${esc(partnerName() || 'your partner')} to see everything she has logged.</p>` : ''}
       ${!theirs ? `<p class="tiny faint">${esc(partnerName() || 'Your partner')} has not posted a score this week.</p>` : ''}
       <hr class="sep">
       <div class="card-title">Your breakdown</div>
@@ -1106,11 +1108,13 @@ function moreView() {
       </div>`).join('') : '<div class="empty tiny">Nothing uploaded.</div>'}
     </div>
 
+    ${appearanceCard()}
+
     <div class="card">
       <div class="card-title">Scoring</div>
       <div class="switch">
         <span>Count nutrition<br><span class="tiny faint">Food logging affects your weekly grade</span></span>
-        <input type="checkbox" data-toggle="toggle-nutrition" ${scoresNutrition() ? 'checked' : ''}>
+        <input type="checkbox" data-change="toggle-nutrition" ${scoresNutrition() ? 'checked' : ''}>
       </div>
       <p class="tiny faint" style="margin-bottom:0">Turn this off and those points move onto training,
       cardio and consistency instead. You are still scored out of 100, so the leaderboard stays fair.
@@ -1924,6 +1928,36 @@ const ACTIONS = {
       <button class="btn primary wide" type="submit">Save</button>
     </form>`),
 
+  /* ---------- the other person ---------- */
+
+  'view-partner': () => partnerSheet(),
+
+  /* Her sessions live in partnerData, not S.workouts, and are read-only: there
+     is no deleting or grading someone else's training. */
+  'view-partner-workout': (el) => {
+    const w = partnerData?.workouts.find((x) => x.id === el.dataset.id);
+    if (!w) return;
+    openSheet(`${w.name || 'Workout'} · ${w.date}`, reviewBody(w, [], { readOnly: true }));
+  },
+
+  /* ---------- appearance ---------- */
+
+  'set-bg': (el) => guard(async () => {
+    applyTheme(el.value, S.profile?.themeAccent);
+    await W.saveProfile({ themeBg: el.value });
+    S.profile.themeBg = el.value;
+    render();
+  }),
+
+  'set-accent': (el) => guard(async () => {
+    applyTheme(S.profile?.themeBg, el.value);
+    await W.saveProfile({ themeAccent: el.value });
+    S.profile.themeAccent = el.value;
+    render();
+  }),
+
+  'pick-accent': (el) => ACTIONS['set-accent']({ value: el.dataset.val }),
+
   /* ---------- looking back at a week ---------- */
 
   'view-week': (el) => weekSheet(el.dataset.week),
@@ -2427,8 +2461,11 @@ function wire(root) {
   });
 
   root.addEventListener('change', (ev) => {
-    const toggle = ev.target.closest('[data-toggle]');
-    if (toggle && ACTIONS[toggle.dataset.toggle]) ACTIONS[toggle.dataset.toggle](toggle);
+    /* Checkboxes and selects are driven by `change`, never by `click`: the click
+       delegation deliberately ignores native controls so their own behaviour
+       still works. See the guard above. */
+    const ctl = ev.target.closest('[data-change]');
+    if (ctl && ACTIONS[ctl.dataset.change]) ACTIONS[ctl.dataset.change](ctl);
   });
 
   root.addEventListener('click', (ev) => {
@@ -2841,11 +2878,40 @@ function bootDemo() {
   S.program = { ...PROG.expandProgram(template, { weeks: 5 }), id: 'current', startDate: SCORE.dayKey(new Date(Date.now() - 9 * 86400000)) };
 
   EX.registerCustom(S.profile.customExercises || []);
+  applyTheme(S.profile.themeBg, S.profile.themeAccent);
   S.session = unstash(draftKey());
   S.timer = unstash(timerKey());
 
   /* Every write becomes a no-op so the demo cannot reach the network. */
   for (const k of Object.keys(W)) W[k] = async () => 'demo';
+
+  /* Her side of the app, so the partner screen can actually be looked at.
+     demoData() keeps its own day() helper private, so this needs one too. */
+  const day = (n) => SCORE.dayKey(new Date(Date.now() - n * 86400000));
+
+  demoPartner = {
+    workouts: [
+      { id: 'aw1', date: day(0), name: 'Full body', entries: [
+        { exerciseId: 'goblet_squat', sets: [{ weight: 35, reps: 12 }, { weight: 35, reps: 12 }, { weight: 35, reps: 10 }] },
+        { exerciseId: 'hip_thrust', sets: [{ weight: 95, reps: 12 }, { weight: 95, reps: 12 }] },
+        { exerciseId: 'cable_crunch', sets: [{ weight: 40, reps: 15 }, { weight: 40, reps: 15 }] },
+      ] },
+      { id: 'aw2', date: day(3), name: 'Full body', entries: [
+        { exerciseId: 'rdl', sets: [{ weight: 85, reps: 10 }, { weight: 85, reps: 10 }] },
+        { exerciseId: 'lat_pulldown_m', sets: [{ weight: 70, reps: 12 }, { weight: 70, reps: 12 }] },
+      ] },
+    ],
+    cardio: [
+      { id: 'ac1', date: day(1), kind: 'class', classId: 'solidcore', minutes: 50,
+        effort: 'brutal', groups: ['core', 'legs'], studio: 'Solidcore Fort Worth' },
+      { id: 'ac2', date: day(2), kind: 'class', classId: 'reformer_pilates', minutes: 55,
+        effort: 'solid', groups: ['core', 'glutes'] },
+      { id: 'ac3', date: day(4), exerciseId: 'incline_walk', minutes: 30 },
+    ],
+    metrics: [{ id: 'am1', date: day(1), weight: 134 }],
+    photos: [],
+    health: [],
+  };
 
   /* Demo only: exposes state so a browser session can inspect it. */
   window.__S = S;
@@ -2864,6 +2930,16 @@ function bootDemo() {
      sheet cannot be opened by a headless screenshot that cannot click. */
   const wk = params.get('week');
   if (wk) weekSheet(wk === 'last' ? pastWeeks()[0] : wk);
+
+  if (params.has('partner')) partnerSheet();
+
+  /* ?demo&bg=forest&accent=teal renders a theme without needing to click, so a
+     headless screenshot can prove every screen still uses the tokens. */
+  if (params.get('bg') || params.get('accent')) {
+    S.profile.themeBg = params.get('bg') || 'midnight';
+    S.profile.themeAccent = params.get('accent') || 'crimson';
+    applyTheme(S.profile.themeBg, S.profile.themeAccent);
+  }
 }
 
 
@@ -2947,7 +3023,7 @@ function recentHistoryText(excludeId) {
     .join('\n');
 }
 
-function reviewBody(w, prs = []) {
+function reviewBody(w, prs = [], opts = {}) {
   const mins = w.endedAt && w.startedAt ? Math.round((w.endedAt - w.startedAt) / 60000) : null;
 
   return `
@@ -2967,7 +3043,7 @@ function reviewBody(w, prs = []) {
       ${mins ? `<div><div class="stat">${mins}</div><div class="tiny faint">minutes</div></div>` : ''}
     </div>
 
-    <div id="grade-slot">${gradeBlock(w)}</div>
+    ${opts.readOnly ? '' : `<div id="grade-slot">${gradeBlock(w)}</div>`}
 
     ${(w.entries || []).map((e) => {
       const ex = EX.BY_ID[e.exerciseId];
@@ -2981,8 +3057,8 @@ function reviewBody(w, prs = []) {
       </div>`;
     }).join('')}
 
-    <hr class="sep">
-    <button class="btn ghost wide sm" data-act="del-workout" data-id="${esc(w.id)}" style="color:var(--bad)">Delete this session</button>`;
+    ${opts.readOnly ? '' : `<hr class="sep">
+    <button class="btn ghost wide sm" data-act="del-workout" data-id="${esc(w.id)}" style="color:var(--bad)">Delete this session</button>`}`;
 }
 
 function gradeBlock(w) {
@@ -3638,6 +3714,199 @@ function classSummaryCard() {
   </div>`;
 }
 
+
+/* ============================== appearance ============================== */
+
+/*
+ * Themes are set on the root element, not swapped into the stylesheet, so a
+ * change is one attribute write and costs nothing.
+ *
+ * The choice lives on the profile so it follows the account to any device, and
+ * is MIRRORED to localStorage so it can be applied before Firebase has
+ * answered. Without the mirror every cold start would flash the default theme
+ * for a second, which looks like a bug.
+ */
+const BACKGROUNDS = [
+  ['midnight', 'Midnight'], ['charcoal', 'Charcoal'], ['ink', 'Ink'],
+  ['espresso', 'Espresso'], ['forest', 'Forest'],
+];
+
+/* Hex kept alongside the id purely for the swatch dots. The real palette lives
+   in index.html, generated with measured contrast; these must match it. */
+const ACCENTS = [
+  ['crimson', 'Crimson', '#ff4f6a'], ['blue', 'Blue', '#3987e5'],
+  ['violet', 'Violet', '#8b5cf6'], ['teal', 'Teal', '#14b8a6'],
+  ['green', 'Green', '#22c55e'], ['amber', 'Amber', '#f59e0b'],
+  ['pink', 'Pink', '#ec4899'],
+];
+
+const THEME_KEY = 'lockin.theme';
+
+function applyTheme(bg, accent) {
+  const root = document.documentElement;
+  root.dataset.bg = bg || 'midnight';
+  root.dataset.accent = accent || 'crimson';
+  try { localStorage.setItem(THEME_KEY, JSON.stringify({ bg, accent })); } catch { /* private mode */ }
+}
+
+/** Called before auth resolves, so the first paint is already the right colour. */
+function applyStoredTheme() {
+  try {
+    const t = JSON.parse(localStorage.getItem(THEME_KEY) || '{}');
+    applyTheme(t.bg, t.accent);
+  } catch { applyTheme(); }
+}
+
+const appearanceCard = () => `<div class="card">
+  <div class="card-title">Appearance</div>
+  <div class="field-row">
+    <div class="field">
+      <label for="th-bg">Background</label>
+      <select id="th-bg" data-change="set-bg">
+        ${BACKGROUNDS.map(([k, l]) => `<option value="${k}" ${(S.profile?.themeBg || 'midnight') === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field">
+      <label for="th-accent">Accent</label>
+      <select id="th-accent" data-change="set-accent">
+        ${ACCENTS.map(([k, l]) => `<option value="${k}" ${(S.profile?.themeAccent || 'crimson') === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>
+    </div>
+  </div>
+  <div class="chips" style="margin-top:4px">
+    ${ACCENTS.map(([k, , hex]) => `<button type="button" data-act="pick-accent" data-val="${k}"
+      aria-label="${esc(k)}" style="width:28px;height:28px;padding:0;border-radius:50%;
+      background:${hex};border:2px solid ${(S.profile?.themeAccent || 'crimson') === k ? 'var(--text)' : 'transparent'}"></button>`).join('')}
+  </div>
+  <p class="tiny faint" style="margin-bottom:0">Yours only. Ashtin keeps her own colours.</p>
+</div>`;
+
+/* ============================== the other person ============================== */
+
+/*
+ * Everything she has logged, except what she kept private.
+ *
+ * Loaded on demand rather than at boot: it is a screen you open occasionally,
+ * and fetching a second person's whole history on every launch would slow the
+ * start for nothing.
+ *
+ * The privacy split is enforced by firestore.rules, not here. Photos come back
+ * only when `private == false` and health documents only when `shared == true`,
+ * and db.js queries exactly the shapes those rules accept. This code cannot see
+ * anything she did not choose to share even if it asked.
+ */
+let partnerData = null;
+
+/* Demo mode has no Firebase to read a second account from, and this screen is
+   the one most worth eyeballing, so it gets generated data instead. */
+let demoPartner = null;
+
+async function loadPartner() {
+  const id = S.partnerUid;
+  if (!id) return null;
+  if (demoPartner) { partnerData = demoPartner; return partnerData; }
+
+  const [workouts, cardio, metrics, photos, health] = await Promise.all([
+    DB.listEntries('workouts', { max: 200, id }),
+    DB.listEntries('cardio', { max: 200, id }),
+    DB.listEntries('metrics', { max: 120, id }),
+    DB.listSharedPhotos(id, 40).catch(() => []),
+    DB.listSharedHealthDocs(id, 20).catch(() => []),
+  ]);
+
+  partnerData = { workouts, cardio, metrics, photos, health };
+  return partnerData;
+}
+
+function partnerSheet() {
+  const name = partnerName() || 'Your partner';
+  openSheet(name, '<div class="center" style="padding:30px"><span class="spinner"></span></div>');
+
+  guard(async () => {
+    await loadPartner();
+    S.sheet = { title: name, body: partnerBody(), foot: '' };
+    render();
+  }, `Could not load ${name}'s training`);
+}
+
+function partnerBody() {
+  const d = partnerData;
+  if (!d) return '<div class="empty tiny">Nothing to show.</div>';
+
+  const p = S.partnerProfile || {};
+  const week = thisWeek();
+  const from = SCORE.dayKey(SCORE.weekRange(week).start);
+  const weekWork = d.workouts.filter((w) => w.date >= from);
+  const weekCardio = d.cardio.filter((c) => c.date >= from);
+
+  const score = S.couple?.scores?.[week]?.[S.partnerUid];
+  const vol = STATS.combinedVolumeByGroup(weekWork, weekCardio);
+  const groups = Object.entries(vol).filter(([, v]) => v.total > 0)
+    .sort((a, b) => b[1].total - a[1].total);
+  const top = groups.length ? groups[0][1].total : 1;
+
+  const streak = SCORE.restStreak(STATS.activeDates(d.workouts, d.cardio), {
+    allowance: Math.max(0, num(p.restDaysPerWeek, SCORE.DEFAULT_REST_ALLOWANCE)),
+  });
+
+  return `
+    <div class="row" style="gap:18px;margin-bottom:14px">
+      ${score ? `<div><div class="stat" style="color:${gradeColor(score.total)}">${score.total}</div>
+        <div class="tiny faint">this week</div></div>` : ''}
+      <div><div class="stat">${streak.days}</div><div class="tiny faint">day streak</div></div>
+      <div><div class="stat">${weekWork.length + weekCardio.length}</div><div class="tiny faint">sessions this week</div></div>
+    </div>
+
+    ${p.goal ? `<p class="tiny muted" style="margin-top:0">Goal: ${esc(PROG.GOALS[p.goal]?.label || p.goal)}${
+      p.daysPerWeek ? ` &middot; training ${p.daysPerWeek} days a week` : ''}</p>` : ''}
+
+    ${groups.length ? `<div class="card-title">Trained this week</div>
+      ${groups.map(([g, v]) => `<div class="list-row" style="border:0;padding:4px 0">
+        <span class="tiny" style="width:74px">${esc(EX.GROUP_LABELS[g] || g)}</span>
+        <div class="bar grow"><i style="width:${(v.total / top) * 100}%;background:${GROUP_COLOR[g] || 'var(--accent-dim)'}"></i></div>
+        <span class="tiny faint" style="width:26px;text-align:right">${round(v.total, 1)}</span>
+      </div>`).join('')}
+      <hr class="sep">` : ''}
+
+    <div class="card-title">Recent sessions</div>
+    ${d.workouts.length ? d.workouts.slice(0, 12).map((w) => `<div class="list-row"
+        data-act="view-partner-workout" data-id="${esc(w.id)}" role="button" tabindex="0">
+      <div class="grow">
+        <b class="ellip">${esc(w.name || 'Workout')}</b>
+        <span class="tiny muted">${esc(w.date)} &middot; ${STATS.setCount(w)} sets &middot; ${Math.round(STATS.tonnage(w)).toLocaleString()} lb</span>
+      </div>
+      <span class="faint" aria-hidden="true">&rsaquo;</span>
+    </div>`).join('') : '<div class="empty tiny">Nothing logged yet.</div>'}
+
+    ${d.cardio.length ? `<hr class="sep">
+      <div class="card-title">Cardio and classes</div>
+      ${d.cardio.slice(0, 12).map((c) => `<div class="list-row">
+        <div class="grow"><b class="ellip">${esc(cardioLabel(c))}</b>
+          <span class="tiny muted">${esc(c.date)} &middot; ${num(c.minutes)} min${
+            c.studio ? ` &middot; ${esc(c.studio)}` : ''}</span></div>
+      </div>`).join('')}` : ''}
+
+    ${d.photos.length ? `<hr class="sep">
+      <div class="card-title">Shared photos</div>
+      <div class="grid3">
+        ${d.photos.slice(0, 12).map((ph) => `<div style="position:relative;border-radius:10px;overflow:hidden">
+          <img src="${esc(ph.image)}" alt="${esc(ph.pose || 'progress photo')} ${esc(ph.date)}"
+            style="width:100%;display:block;aspect-ratio:3/4;object-fit:cover">
+          <span class="pill" style="position:absolute;left:4px;bottom:4px;background:rgba(0,0,0,.7);color:#fff">${esc(ph.date)}</span>
+        </div>`).join('')}
+      </div>` : ''}
+
+    ${d.health.length ? `<hr class="sep">
+      <div class="card-title">Shared documents</div>
+      ${d.health.map((x) => `<div class="list-row">
+        <div class="grow"><b class="ellip">${esc(x.parsed?.kind || 'Document')} &middot; ${esc(x.date || x.parsed?.date || '')}</b>
+          <span class="tiny muted">${(x.parsed?.markers || []).length} markers</span></div>
+      </div>`).join('')}` : ''}
+
+    <p class="tiny faint" style="margin-top:14px;margin-bottom:0">Private photos and unshared
+    documents are not here, and cannot be: the database refuses to hand them over.</p>`;
+}
+
 /* ============================== boot ============================== */
 
 async function loadAll() {
@@ -3661,6 +3930,8 @@ function findPartner() {
 }
 
 async function boot() {
+  /* Before anything renders, so a cold start never flashes the wrong colours. */
+  applyStoredTheme();
   wire($('#app'));
 
   if (new URLSearchParams(location.search).has('demo')) return bootDemo();
@@ -3689,6 +3960,7 @@ async function boot() {
          renders. Every screen resolves exercises through EX.BY_ID, so a logged
          set referencing a custom id would otherwise draw as a raw slug. */
       EX.registerCustom(S.profile?.customExercises || []);
+      applyTheme(S.profile?.themeBg, S.profile?.themeAccent);
 
       if (S.profile?.complete) {
         await loadAll();
