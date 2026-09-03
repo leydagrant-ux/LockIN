@@ -1057,6 +1057,69 @@ section('anatomy');
   eq('an empty log summarises to nothing', T.classSummary([]).total, 0);
 }
 
+/* ============================== switching a component off ============================== */
+
+{
+  section('scoring without nutrition');
+
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+
+  /* The whole reason this redistributes rather than subtracts: the two scores
+     sit next to each other on a leaderboard every week. Grading one person out
+     of 80 and the other out of 100 would hand her every week by default. */
+  eq('the default table still sums to 100', sum(S.componentMaxes([])), S.MAX_SCORE);
+  eq('and so does the table without nutrition',
+    sum(S.componentMaxes(['nutrition'])), S.MAX_SCORE);
+  eq('dropping two components still sums to 100',
+    sum(S.componentMaxes(['nutrition', 'cardio'])), S.MAX_SCORE);
+  eq('dropping every component falls back rather than scoring zero',
+    sum(S.componentMaxes(S.COMPONENTS.map((c) => c.id))), S.MAX_SCORE);
+
+  const off = S.componentMaxes(['nutrition']);
+  eq('a skipped component is absent, not zero', off.nutrition, undefined);
+  check('the points land on training', off.adherence > 40);
+  check('every remaining component keeps a whole number of points',
+    Object.values(off).every((n) => Number.isInteger(n)));
+  check('and none of them lose points', S.COMPONENTS
+    .filter((c) => c.id !== 'nutrition')
+    .every((c) => off[c.id] >= c.max));
+
+  /* Redistribution is proportional, so the biggest component gains the most. */
+  check('adherence gains more than check-ins do',
+    (off.adherence - 40) > (off.checkin - 5));
+
+  const week = {
+    plannedSessions: 4, completedSessions: 4, totalSessions: 7,
+    nutritionDaysOnTarget: 7, cardioMinutes: 90, streak: 10, checkins: 3,
+  };
+  eq('a perfect week is 100 with nutrition counted', S.scoreWeek(week).total, 100);
+  eq('and still 100 without it',
+    S.scoreWeek(week, undefined, { skip: ['nutrition'] }).total, 100);
+
+  /* Grant's actual case: he trains hard and never logs a meal. */
+  const noFood = { ...week, nutritionDaysOnTarget: 0 };
+  eq('never logging food costs 20 points while it is counted',
+    S.scoreWeek(noFood).total, 80);
+  eq('and costs nothing once it is switched off',
+    S.scoreWeek(noFood, undefined, { skip: ['nutrition'] }).total, 100);
+
+  const shown = S.scoreWeek(noFood, undefined, { skip: ['nutrition'] }).components;
+  eq('the breakdown drops the row entirely', shown.length, S.COMPONENTS.length - 1);
+  check('so nothing reads as a 0 out of 0',
+    !shown.some((c) => c.id === 'nutrition'));
+  eq('and the rows carry their new maxima',
+    shown.find((c) => c.id === 'adherence').max, off.adherence);
+
+  /* Skipping nothing must be byte-identical to not passing opts at all, which
+     is what proves this is invisible to anyone who leaves it on. */
+  eq('an empty skip list changes nothing',
+    JSON.stringify(S.scoreWeek(week, undefined, { skip: [] })),
+    JSON.stringify(S.scoreWeek(week)));
+  eq('and neither does omitting opts',
+    JSON.stringify(S.scoreWeek(noFood, undefined, {})),
+    JSON.stringify(S.scoreWeek(noFood)));
+}
+
 /* ============================== report ============================== */
 
 export function runAll() {

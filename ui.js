@@ -319,6 +319,12 @@ const weekWorkouts = () => {
   return S.workouts.filter((w) => w.date >= from);
 };
 
+/* Undefined means on. Nobody who set up an account before this existed should
+   silently stop being scored on something they were tracking. */
+const scoresNutrition = () => S.profile?.trackNutrition !== false;
+
+const skippedComponents = () => (scoresNutrition() ? [] : ['nutrition']);
+
 const restAllowance = () =>
   Math.max(0, num(S.profile?.restDaysPerWeek, SCORE.DEFAULT_REST_ALLOWANCE));
 
@@ -372,7 +378,7 @@ function weekScore(weekKey) {
     cardioMinutes: cardio.reduce((s, c) => s + num(c.minutes), 0),
     streak: myStreak(asOf).days,
     checkins: checkins.length + metrics.length,
-  }, { plannedSessions: planned });
+  }, { plannedSessions: planned }, { skip: skippedComponents() });
 }
 
 const myScore = () => weekScore(thisWeek());
@@ -1101,6 +1107,17 @@ function moreView() {
     </div>
 
     <div class="card">
+      <div class="card-title">Scoring</div>
+      <div class="switch">
+        <span>Count nutrition<br><span class="tiny faint">Food logging affects your weekly grade</span></span>
+        <input type="checkbox" data-toggle="toggle-nutrition" ${scoresNutrition() ? 'checked' : ''}>
+      </div>
+      <p class="tiny faint" style="margin-bottom:0">Turn this off and those points move onto training,
+      cardio and consistency instead. You are still scored out of 100, so the leaderboard stays fair.
+      The Food tab keeps working either way.</p>
+    </div>
+
+    <div class="card">
       <div class="card-title">Profile</div>
       <div class="list-row"><div class="grow"><b>Goal</b>
         <span class="tiny muted">${esc(PROG.GOALS[S.profile?.goal]?.label || '')}</span></div>
@@ -1633,6 +1650,17 @@ const ACTIONS = {
         <input type="checkbox" name="private" checked></div>
       <button class="btn primary wide" type="submit" style="margin-top:12px">Save</button>
     </form>`),
+
+  'toggle-nutrition': (el) => guard(async () => {
+    const next = el.checked;
+    await W.saveProfile({ trackNutrition: next });
+    S.profile.trackNutrition = next;
+    /* Republish, or the partner's leaderboard keeps showing the old split. */
+    await publishScore();
+    toast(next ? 'Nutrition counts toward your weekly score'
+      : 'Nutrition no longer affects your score', 'ok');
+    render();
+  }),
 
   'toggle-photo': (el) => guard(async () => {
     const p = S.photos.find((x) => x.id === el.dataset.id);
@@ -2396,6 +2424,11 @@ function wire(root) {
       ev.preventDefault();
       ACTIONS[act.dataset.act](act);
     }
+  });
+
+  root.addEventListener('change', (ev) => {
+    const toggle = ev.target.closest('[data-toggle]');
+    if (toggle && ACTIONS[toggle.dataset.toggle]) ACTIONS[toggle.dataset.toggle](toggle);
   });
 
   root.addEventListener('click', (ev) => {

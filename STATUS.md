@@ -33,7 +33,7 @@ secrets. They exist nowhere on disk — to rotate one, run
 python -m http.server 8777 --directory LockIN
 ```
 
-- `http://localhost:8777/selftest.html` — **316 / 316 passing**
+- `http://localhost:8777/selftest.html` — **334 / 334 passing**
 - `http://localhost:8777/index.html?demo` — whole app on generated data,
   `&tab=body` jumps to a screen
 
@@ -57,7 +57,7 @@ served from cache. Worker changes need `npx wrangler deploy` from `worker/`.
 | `foods.js` | USDA + Open Food Facts + barcode + saved library | Normalisers run against live API payloads; USDA per-serving scaling verified exact |
 | `db.js` | Firebase auth, Firestore CRUD, image compression, export/import | Syntax clean; **not yet run against a live Firebase project** |
 | `worker/` | Cloudflare Worker, `/ai` and `/food`, Firebase JWT gate | Syntax clean; **not yet deployed** |
-| `selftest.js/.html` | 316 regression checks | Passing |
+| `selftest.js/.html` | 334 regression checks | Passing |
 | `sw.js`, `manifest`, `icons/` | PWA shell | Icons generated |
 | `index.html` + `ui.js` | The whole UI: auth, onboarding, logger, body map, food, leaderboard, settings | Driven in a real browser: onboarding walked end to end, a session logged and finished, PR sheet fired, equipment presets, all five tabs |
 | `README.md` | Full setup guide | — |
@@ -274,6 +274,48 @@ which is what proves none of this changed anything for Grant.
 
 The demo data now contains two classes, because that path cannot be eyeballed
 without one.
+
+### Nutrition is optional in the weekly grade (v0.3.6)
+
+Grant does not track food and does not want to. Ashtin does. The weekly score
+docked him 20 points every week for a thing he was never going to do, and that
+is most of why Ashtin kept winning.
+
+**More -> Scoring -> Count nutrition** switches it off per account.
+
+**The points are redistributed, not deleted.** The two scores sit next to each
+other on a leaderboard every week; grading him out of 80 and her out of 100
+would make the comparison meaningless and hand her every week by default. So
+`componentMaxes(skip)` shares the dropped points across whatever remains, in
+proportion to the existing weights, and the table always sums to `MAX_SCORE`:
+
+| | adherence | extra | nutrition | cardio | streak | check-ins |
+|---|---|---|---|---|---|---|
+| default | 40 | 15 | 20 | 10 | 10 | 5 |
+| nutrition off | **50** | **19** | — | **13** | **12** | **6** |
+
+Largest-remainder rounding, because the proportional shares land on halves and
+quarters and naive rounding does not add back to 100. Ties break by component
+order so the table is deterministic.
+
+A skipped component is **absent** from the breakdown rather than shown as 0/0,
+which would read as a failure rather than a setting.
+
+In the demo this took Grant from 64 to 80 and flipped the week from Ashtin
+leading 78-64 to Grant leading 80-78. The Food tab is untouched and still works;
+this only changes what is graded.
+
+`trackNutrition` defaults to on when the field is absent, so neither existing
+account changes behaviour until someone flips the switch.
+
+18 new checks. Two of them assert that passing an empty skip list, or omitting
+the option entirely, produces byte-identical output to the old call — which is
+what proves this is invisible to Ashtin.
+
+**One wiring note:** the switch is a checkbox, so it is driven by a new
+`change` delegation on `[data-toggle]`, not by the click handler. The click
+handler now deliberately ignores native controls (see v0.3.5), so a checkbox
+carrying `data-act` would never have fired.
 
 ### Needs a Worker redeploy
 

@@ -217,6 +217,52 @@ export const MAX_SCORE = COMPONENTS.reduce((s, c) => s + c.max, 0);
 const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
 const pts = (fraction, max) => Math.round(clamp01(fraction) * max);
 
+/**
+ * Component maxima with some components switched off.
+ *
+ * Grant does not track food; Ashtin does. Switching nutrition off cannot simply
+ * delete its 20 points, because the two scores are put side by side on a
+ * leaderboard every week: grading him out of 80 and her out of 100 would make
+ * the comparison meaningless and quietly hand her every week.
+ *
+ * So the dropped points are REDISTRIBUTED across whatever remains, in
+ * proportion to the existing weights, and the total is always MAX_SCORE. What
+ * changes is where the points come from, not how many there are.
+ *
+ * Largest-remainder rounding, because the proportional shares land on halves
+ * and quarters and naive rounding does not add back up to 100.
+ *
+ * @param {string[]} [skip] component ids to leave out
+ * @returns {Object<string, number>} id -> max, summing to MAX_SCORE
+ */
+export function componentMaxes(skip = []) {
+  const off = new Set(skip || []);
+  let kept = COMPONENTS.filter((c) => !off.has(c.id));
+  /* Switching everything off is not a score of zero, it is a mistake. */
+  if (!kept.length) kept = COMPONENTS;
+
+  const base = kept.reduce((n, c) => n + c.max, 0);
+  const exact = kept.map((c, i) => ({ id: c.id, i, value: (c.max / base) * MAX_SCORE }));
+
+  const out = {};
+  let used = 0;
+  for (const e of exact) {
+    out[e.id] = Math.floor(e.value);
+    used += out[e.id];
+  }
+
+  /* Leftovers go to the largest fractions first, ties broken by component order
+     so the same inputs always produce the same table. */
+  const byFraction = [...exact]
+    .map((e) => ({ ...e, frac: e.value - Math.floor(e.value) }))
+    .sort((a, b) => b.frac - a.frac || a.i - b.i);
+
+  for (let k = 0; used < MAX_SCORE; k += 1, used += 1) {
+    out[byFraction[k % byFraction.length].id] += 1;
+  }
+  return out;
+}
+
 /** Default weekly targets, overridable per user in settings. */
 export const DEFAULT_TARGETS = {
   plannedSessions: 4,
@@ -240,10 +286,14 @@ export const DEFAULT_TARGETS = {
  * @param {number}   w.streak
  * @param {number}   w.checkins          weigh-ins + readiness check-ins
  * @param {object}  [targets]
+ * @param {object}  [opts]
+ * @param {string[]} [opts.skip] components this person does not want scored
  * @returns {{total:number, components:Array, max:number}}
  */
-export function scoreWeek(w, targets = DEFAULT_TARGETS) {
+export function scoreWeek(w, targets = DEFAULT_TARGETS, opts = {}) {
   const t = { ...DEFAULT_TARGETS, ...targets };
+  const skip = opts.skip || [];
+  const maxes = componentMaxes(skip);
 
   const planned = Math.max(0, Number(w.plannedSessions) || 0);
   const completed = Math.max(0, Number(w.completedSessions) || 0);
@@ -259,19 +309,22 @@ export function scoreWeek(w, targets = DEFAULT_TARGETS) {
      the surplus below is measured against this value, so leaving it unclamped
      made a big overshoot (9 done, 4 planned) report ZERO extra work. */
   const credited = Math.min(completed, denominator);
-  const adherence = pts(credited / denominator, 40);
+  const adherence = pts(credited / denominator, maxes.adherence || 0);
 
   /* Everything above the plan is extra credit, capped so nobody wins the week
      by grinding themselves into the ground. Three bonus sessions maxes it. */
   const extras = Math.max(0, total - credited);
-  const extra = pts(extras / 3, 15);
+  const extra = pts(extras / 3, maxes.extra || 0);
 
-  const nutrition = pts((Number(w.nutritionDaysOnTarget) || 0) / t.nutritionDays, 20);
-  const cardio = pts((Number(w.cardioMinutes) || 0) / t.cardioMinutes, 10);
-  const streak = pts((Number(w.streak) || 0) / 10, 10);
-  const checkin = pts((Number(w.checkins) || 0) / t.checkins, 5);
+  const scores = {
+    adherence,
+    extra,
+    nutrition: pts((Number(w.nutritionDaysOnTarget) || 0) / t.nutritionDays, maxes.nutrition || 0),
+    cardio: pts((Number(w.cardioMinutes) || 0) / t.cardioMinutes, maxes.cardio || 0),
+    streak: pts((Number(w.streak) || 0) / 10, maxes.streak || 0),
+    checkin: pts((Number(w.checkins) || 0) / t.checkins, maxes.checkin || 0),
+  };
 
-  const scores = { adherence, extra, nutrition, cardio, streak, checkin };
   const details = {
     adherence: `${credited} of ${denominator} planned`,
     extra: extras > 0 ? `${extras} extra session${extras === 1 ? '' : 's'}` : 'none',
@@ -281,11 +334,15 @@ export function scoreWeek(w, targets = DEFAULT_TARGETS) {
     checkin: `${Number(w.checkins) || 0} of ${t.checkins}`,
   };
 
+  /* A skipped component is absent, not zeroed. A row reading 0/0 would look
+     like a failure rather than a setting. */
+  const shown = COMPONENTS.filter((c) => maxes[c.id] != null);
+
   return {
-    total: Object.values(scores).reduce((a, b) => a + b, 0),
+    total: shown.reduce((n, c) => n + scores[c.id], 0),
     max: MAX_SCORE,
-    components: COMPONENTS.map((c) => ({
-      ...c, points: scores[c.id], detail: details[c.id],
+    components: shown.map((c) => ({
+      ...c, max: maxes[c.id], points: scores[c.id], detail: details[c.id],
     })),
   };
 }
