@@ -620,7 +620,9 @@ function todayView() {
   const checkin = S.checkins.find((c) => c.date === todayKey());
   const sess = todaySession();
   const streak = streakLine();
-  const loggedToday = S.workouts.some((w) => w.date === todayKey());
+  const doneToday = S.workouts.filter((w) => w.date === todayKey());
+  const cardioToday = S.cardio.filter((c) => c.date === todayKey());
+  const trainedToday = doneToday.length > 0 || cardioToday.length > 0;
 
   return `<div class="screen">
     <div class="top">
@@ -638,19 +640,20 @@ function todayView() {
 
     ${!S.session && checkin && sess ? sessionCard(sess) : ''}
 
-    ${!S.session && checkin && !sess ? (S.program ? restDayCard() : `<div class="card">
+    ${!S.session && trainedToday ? doneTodayCard(doneToday, cardioToday) : ''}
+
+    ${!S.session && checkin && !sess && !trainedToday
+      ? (S.program ? restDayCard() : `<div class="card">
       <div class="card-title">No program yet</div>
       <p class="muted tiny" style="margin-top:0">Build one and it will show up here each day,
       already adjusted for how you said you feel.</p>
       <button class="btn primary wide" data-act="go-program">Build my program</button>
     </div>`) : ''}
 
-    ${!S.session ? `<div class="btn-row" style="margin-bottom:12px">
+    ${!S.session && !trainedToday && !(checkin && !sess && S.program) ? `<div class="btn-row" style="margin-bottom:12px">
       <button class="btn" data-act="quick-workout">Log a workout</button>
       <button class="btn" data-act="quick-cardio">Log cardio</button>
     </div>` : ''}
-
-    ${loggedToday ? `<div class="banner ok">Session logged today. ${esc(prSummary())}</div>` : ''}
 
     ${overloadCard()}
 
@@ -681,6 +684,78 @@ function streakLine() {
         : `${plural(-left, 'day', 'days')} over your rest allowance`;
 
   return ` · ${plural(st.days, 'day', 'days')} streak · ${tail}`;
+}
+
+/**
+ * What you did today, shown where the prescription used to be.
+ *
+ * Being finished for the day used to render the REST DAY card, because the only
+ * question asked was whether anything was still due. Sitting directly above a
+ * session you had just logged, that read as though the app had lost it. Having
+ * trained is the more important fact, so it wins the slot, and the rest-day
+ * card is now only for a day with nothing on it at all.
+ *
+ * The shape deliberately mirrors the sheet you get on finishing a workout:
+ * the same three numbers, the same PRs, the same grade.
+ */
+function doneTodayCard(workouts, cardio) {
+  const sets = workouts.reduce((n, w) => n + STATS.setCount(w), 0);
+  const volume = workouts.reduce((n, w) => n + STATS.tonnage(w), 0);
+  const minutes = workouts.reduce((n, w) => n
+    + (w.endedAt && w.startedAt ? Math.round((w.endedAt - w.startedAt) / 60000) : 0), 0)
+    + cardio.reduce((n, c) => n + num(c.minutes), 0);
+
+  /* PRs are judged against everything that came before today, so a second
+     session today cannot cancel out the first one's records. */
+  const history = S.workouts.filter((w) => w.date < todayKey());
+  const prs = workouts.flatMap((w) => STATS.newPRsIn(w, history));
+
+  const graded = workouts.filter((w) => w.grade);
+  const best = graded.length
+    ? graded.reduce((a, b) => (a.grade.score >= b.grade.score ? a : b))
+    : null;
+
+  const stillDue = todaySession();
+
+  return `<div class="card">
+    <div class="card-title row">
+      <span>Done today</span>
+      ${best ? `<span class="pill" style="background:var(--surface-2);color:${gradeColor(best.grade.score)}">${best.grade.score}</span>` : ''}
+    </div>
+
+    <div class="row" style="gap:18px;margin-bottom:14px">
+      ${sets ? `<div><div class="stat">${sets}</div><div class="tiny faint">sets</div></div>` : ''}
+      ${volume ? `<div><div class="stat">${Math.round(volume).toLocaleString()}</div><div class="tiny faint">lb moved</div></div>` : ''}
+      ${minutes ? `<div><div class="stat">${minutes}</div><div class="tiny faint">minutes</div></div>` : ''}
+    </div>
+
+    ${prs.length ? `<div class="banner ok" style="margin-bottom:12px">&#127942;
+      ${prs.map((x) => `${esc(x.name)} ${round(x.value, 1)}${x.kind === 'weight' ? ' lb' : ' lb est. max'}`).join(' · ')}</div>` : ''}
+
+    ${workouts.map((w) => `<div class="list-row" data-act="view-workout" data-id="${esc(w.id)}" role="button" tabindex="0">
+      <div class="grow">
+        <b class="ellip">${esc(w.name || 'Workout')}</b>
+        <span class="tiny muted">${STATS.setCount(w)} sets · ${Math.round(STATS.tonnage(w)).toLocaleString()} lb</span>
+      </div>
+      <span class="faint" aria-hidden="true">&rsaquo;</span>
+    </div>`).join('')}
+
+    ${cardio.map((c) => `<div class="list-row">
+      <div class="grow"><b class="ellip">${esc(cardioLabel(c))}</b>
+        <span class="tiny muted">${num(c.minutes)} min${c.distance ? ` · ${round(num(c.distance), 2)} mi` : ''}</span></div>
+    </div>`).join('')}
+
+    ${best?.grade?.headline ? `<p class="tiny muted" style="margin:12px 0 0">${esc(best.grade.headline)}</p>` : ''}
+
+    <p class="tiny faint" style="margin:10px 0 0">${stillDue
+      ? 'Still one session on the plan for today.'
+      : 'That is your training done for today.'}</p>
+
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn sm" data-act="quick-workout">Log another</button>
+      <button class="btn sm" data-act="quick-cardio">Log cardio</button>
+    </div>
+  </div>`;
 }
 
 /* Caught up, or nothing scheduled for today. Either way it is a rest day, and
@@ -738,13 +813,6 @@ function greeting() {
   const name = (S.profile?.name || '').split(' ')[0];
   const part = h < 12 ? 'Morning' : h < 18 ? 'Afternoon' : 'Evening';
   return name ? `${part}, ${esc(name)}` : part;
-}
-
-function prSummary() {
-  const w = S.workouts.find((x) => x.date === todayKey());
-  if (!w) return '';
-  const prs = STATS.newPRsIn(w, S.workouts.filter((x) => x.id !== w.id));
-  return prs.length ? `${plural(prs.length, 'new PR', 'new PRs')}.` : '';
 }
 
 const checkinCard = () => `<div class="card">

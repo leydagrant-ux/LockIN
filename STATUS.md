@@ -416,6 +416,36 @@ used to skip a day and the two-sessions-in-a-day case.
 
 `?demo&plan` opens the editor for screenshotting.
 
+### "Rest day" above a workout you just logged (v0.3.9)
+
+Grant finished his Thursday session and Today told him it was a rest day, with
+the session listed underneath it. The card only asked whether anything was still
+DUE, and being finished for the day satisfies that. Correct logic, wrong message:
+it read as though the app had lost his workout.
+
+Having trained is the more important fact, so it now wins the slot:
+
+- **Trained today** -> a **Done today** recap, deliberately shaped like the sheet
+  you get on finishing a workout: the same three numbers (sets, lb moved,
+  minutes), the same PR line, the same grade. Each session taps through to its
+  full review. Cardio and classes count, so a cardio-only day gets one too.
+- **Nothing logged and nothing due** -> the rest-day card, unchanged.
+- **Something still due** -> the session card, unchanged.
+
+PRs in the recap are judged against everything before today, so a second session
+today cannot cancel out the first one's records.
+
+Two bits of clutter went with it. The standalone `Session logged today.` banner
+is gone, folded into the recap, and with it `prSummary()`, which nothing else
+used. The duplicate Log a workout / Log cardio row is now hidden when the
+rest-day card is showing, since that card already offers both.
+
+**A note on removing dead code with a script:** the first attempt at deleting
+`prSummary()` searched for the next `}` after its `return`, which landed inside
+a template literal and truncated the file into an unterminated string. The
+module import check caught it immediately. Match on the whole function text or
+use the editor, never on a brace.
+
 ### Needs a Worker redeploy
 
 `worker/index.js` gained a `subject` field on `/vision`. Until it is deployed,
